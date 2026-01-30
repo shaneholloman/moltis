@@ -1,4 +1,4 @@
-name: Build Linux Packages
+name: Build Packages
 
 on:
   push:
@@ -13,12 +13,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             arch: amd64
-            runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             arch: arm64
-            runner: ubuntu-latest
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     name: Build .deb (${{ matrix.arch }})
 
     steps:
@@ -58,18 +56,73 @@ jobs:
         with:
           files: target/${{ matrix.target }}/debian/*.deb
 
+  build-rpm:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+
+    runs-on: ubuntu-latest
+    name: Build .rpm (${{ matrix.arch }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm
+
+      - name: Install cross-compilation tools
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary
+        run: |
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            strip target/${{ matrix.target }}/release/moltis
+          else
+            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/moltis
+          fi
+
+      - name: Build .rpm package
+        run: cargo generate-rpm -p crates/cli --target ${{ matrix.target }}
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moltis-${{ matrix.arch }}.rpm
+          path: target/${{ matrix.target }}/generate-rpm/*.rpm
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/${{ matrix.target }}/generate-rpm/*.rpm
+
   build-arch:
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
-            runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             arch: aarch64
-            runner: ubuntu-latest
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     name: Build .pkg.tar.zst (${{ matrix.arch }})
 
     steps:
@@ -130,3 +183,176 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: "*.pkg.tar.zst"
+
+  build-appimage:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+
+    runs-on: ubuntu-latest
+    name: Build AppImage (${{ matrix.arch }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Determine package version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build AppImage
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+
+          # Download appimagetool for the host (always x86_64 runner)
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+
+          # Build AppDir structure
+          APP_DIR="moltis.AppDir"
+          mkdir -p "$APP_DIR/usr/bin"
+          cp "target/${{ matrix.target }}/release/moltis" "$APP_DIR/usr/bin/moltis"
+          chmod 755 "$APP_DIR/usr/bin/moltis"
+
+          # Create .desktop file
+          cat > "$APP_DIR/moltis.desktop" <<DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=Moltis
+          Exec=moltis
+          Icon=moltis
+          Categories=Network;
+          Terminal=true
+          DESKTOP
+
+          # Create minimal icon
+          cat > "$APP_DIR/moltis.svg" <<SVG
+          <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#333"/><text x="128" y="140" font-size="120" text-anchor="middle" fill="white">M</text></svg>
+          SVG
+          ln -s moltis.svg "$APP_DIR/.DirIcon"
+
+          # Create AppRun
+          cat > "$APP_DIR/AppRun" <<'APPRUN'
+          #!/bin/sh
+          SELF=$(readlink -f "$0")
+          HERE=${SELF%/*}
+          exec "$HERE/usr/bin/moltis" "$@"
+          APPRUN
+          chmod +x "$APP_DIR/AppRun"
+
+          # Package - use --appimage-extract-and-run to avoid FUSE requirement in CI
+          ARCH=${{ matrix.arch }} ./appimagetool --appimage-extract-and-run "$APP_DIR" "moltis-${VERSION}-${{ matrix.arch }}.AppImage"
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moltis-${{ matrix.arch }}.AppImage
+          path: "*.AppImage"
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.AppImage"
+
+  build-snap:
+    runs-on: ubuntu-latest
+    name: Build Snap
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: snapcore/action-build@v1
+        id: build-snap
+
+      - name: Upload Snap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moltis.snap
+          path: ${{ steps.build-snap.outputs.snap }}
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build-snap.outputs.snap }}
+
+  build-homebrew-binaries:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+
+    runs-on: ${{ matrix.os }}
+    name: Build binary (${{ matrix.target }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Determine package version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Package binary
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cp target/${{ matrix.target }}/release/moltis moltis
+          tar czf moltis-${VERSION}-${{ matrix.target }}.tar.gz moltis
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moltis-${{ matrix.target }}
+          path: "*.tar.gz"
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.tar.gz"

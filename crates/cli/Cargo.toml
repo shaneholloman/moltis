@@ -17,6 +17,15 @@ assets = [
     ["target/release/moltis", "usr/bin/", "755"],
 ]
 
+[package.metadata.generate-rpm]
+name = "moltis"
+license = "MIT"
+summary = "Rust version of moltbot"
+url = "https://docs.molt.bot/"
+assets = [
+    { source = "target/release/moltis", dest = "/usr/bin/moltis", mode = "0755" },
+]
+
 [[bin]]
 name = "moltis"
 path = "src/main.rs"

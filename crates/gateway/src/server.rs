@@ -78,7 +78,30 @@ pub fn build_gateway_app(state: Arc<GatewayState>, methods: Arc<MethodRegistry>)
     #[cfg(feature = "web-ui")]
     let router = router
         .route("/assets/style.css", get(css_handler))
-        .route("/assets/app.js", get(js_handler))
+        .route("/assets/js/app.js", get(js_app_handler))
+        .route("/assets/js/state.js", get(js_state_handler))
+        .route("/assets/js/icons.js", get(js_icons_handler))
+        .route("/assets/js/helpers.js", get(js_helpers_handler))
+        .route("/assets/js/theme.js", get(js_theme_handler))
+        .route("/assets/js/events.js", get(js_events_handler))
+        .route("/assets/js/router.js", get(js_router_handler))
+        .route("/assets/js/logs-alert.js", get(js_logs_alert_handler))
+        .route("/assets/js/models.js", get(js_models_handler))
+        .route("/assets/js/sandbox.js", get(js_sandbox_handler))
+        .route("/assets/js/projects.js", get(js_projects_handler))
+        .route("/assets/js/project-combo.js", get(js_project_combo_handler))
+        .route("/assets/js/providers.js", get(js_providers_handler))
+        .route("/assets/js/chat-ui.js", get(js_chat_ui_handler))
+        .route("/assets/js/sessions.js", get(js_sessions_handler))
+        .route("/assets/js/session-search.js", get(js_session_search_handler))
+        .route("/assets/js/websocket.js", get(js_websocket_handler))
+        .route("/assets/js/page-chat.js", get(js_page_chat_handler))
+        .route("/assets/js/page-crons.js", get(js_page_crons_handler))
+        .route("/assets/js/page-projects.js", get(js_page_projects_handler))
+        .route("/assets/js/page-providers.js", get(js_page_providers_handler))
+        .route("/assets/js/page-channels.js", get(js_page_channels_handler))
+        .route("/assets/js/page-logs.js", get(js_page_logs_handler))
+        .route("/assets/js/page-skills.js", get(js_page_skills_handler))
         .fallback(spa_fallback);
 
     router.layer(cors).with_state(app_state)
@@ -699,10 +722,39 @@ async fn css_handler() -> impl IntoResponse {
     )
 }
 
-#[cfg(feature = "web-ui")]
-async fn js_handler() -> impl IntoResponse {
-    (
-        [("content-type", "application/javascript; charset=utf-8")],
-        include_str!("assets/app.js"),
-    )
+macro_rules! js_handler {
+    ($name:ident, $path:literal) => {
+        #[cfg(feature = "web-ui")]
+        async fn $name() -> impl IntoResponse {
+            (
+                [("content-type", "application/javascript; charset=utf-8")],
+                include_str!($path),
+            )
+        }
+    };
 }
+
+js_handler!(js_app_handler, "assets/js/app.js");
+js_handler!(js_state_handler, "assets/js/state.js");
+js_handler!(js_icons_handler, "assets/js/icons.js");
+js_handler!(js_helpers_handler, "assets/js/helpers.js");
+js_handler!(js_theme_handler, "assets/js/theme.js");
+js_handler!(js_events_handler, "assets/js/events.js");
+js_handler!(js_router_handler, "assets/js/router.js");
+js_handler!(js_logs_alert_handler, "assets/js/logs-alert.js");
+js_handler!(js_models_handler, "assets/js/models.js");
+js_handler!(js_sandbox_handler, "assets/js/sandbox.js");
+js_handler!(js_projects_handler, "assets/js/projects.js");
+js_handler!(js_project_combo_handler, "assets/js/project-combo.js");
+js_handler!(js_providers_handler, "assets/js/providers.js");
+js_handler!(js_chat_ui_handler, "assets/js/chat-ui.js");
+js_handler!(js_sessions_handler, "assets/js/sessions.js");
+js_handler!(js_session_search_handler, "assets/js/session-search.js");
+js_handler!(js_websocket_handler, "assets/js/websocket.js");
+js_handler!(js_page_chat_handler, "assets/js/page-chat.js");
+js_handler!(js_page_crons_handler, "assets/js/page-crons.js");
+js_handler!(js_page_projects_handler, "assets/js/page-projects.js");
+js_handler!(js_page_providers_handler, "assets/js/page-providers.js");
+js_handler!(js_page_channels_handler, "assets/js/page-channels.js");
+js_handler!(js_page_logs_handler, "assets/js/page-logs.js");
+js_handler!(js_page_skills_handler, "assets/js/page-skills.js");

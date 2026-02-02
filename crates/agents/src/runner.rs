@@ -154,6 +154,105 @@ fn parse_tool_call_from_text(text: &str) -> Option<(ToolCall, Option<String>)> {
     ))
 }
 
+// ── Tool result sanitization ────────────────────────────────────────────
+
+/// Placeholder tag for stripped base64 data URIs.
+const BASE64_TAG: &str = "data:";
+/// Minimum length of a base64 payload to be worth stripping.
+const BASE64_MIN_LEN: usize = 200;
+
+/// Strip base64 data-URI blobs (e.g. `data:image/png;base64,AAAA...`) and
+/// replace them with a short placeholder. Only targets payloads ≥ 200 chars.
+fn strip_base64_blobs(input: &str) -> String {
+    // Pattern: data:<mime>;base64,<payload>
+    // We scan manually to avoid pulling in the regex crate.
+    let mut result = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(start) = rest.find(BASE64_TAG) {
+        result.push_str(&rest[..start]);
+        let after_tag = &rest[start + BASE64_TAG.len()..];
+
+        // Find ";base64," after the MIME type.
+        if let Some(marker_pos) = after_tag.find(";base64,") {
+            let payload_start = marker_pos + ";base64,".len();
+            let payload = &after_tag[payload_start..];
+            // Count contiguous base64 chars.
+            let payload_len = payload
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/' || *b == b'=')
+                .count();
+
+            if payload_len >= BASE64_MIN_LEN {
+                let total_uri_len = BASE64_TAG.len() + payload_start + payload_len;
+                result.push_str(&format!("[base64 data removed — {total_uri_len} bytes]"));
+                rest = &rest[start + total_uri_len..];
+                continue;
+            }
+        }
+
+        // Not a matching pattern — copy the "data:" literally and move on.
+        result.push_str(BASE64_TAG);
+        rest = after_tag;
+    }
+    result.push_str(rest);
+    result
+}
+
+/// Strip long hex sequences (≥ 200 hex chars) that look like binary dumps.
+fn strip_hex_blobs(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.char_indices().peekable();
+
+    while let Some(&(start, ch)) = chars.peek() {
+        if ch.is_ascii_hexdigit() {
+            // Consume contiguous hex chars.
+            let mut end = start;
+            while let Some(&(i, c)) = chars.peek() {
+                if c.is_ascii_hexdigit() {
+                    end = i + c.len_utf8();
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let run = end - start;
+            if run >= 200 {
+                result.push_str(&format!("[hex data removed — {run} chars]"));
+            } else {
+                result.push_str(&input[start..end]);
+            }
+        } else {
+            result.push(ch);
+            chars.next();
+        }
+    }
+    result
+}
+
+/// Sanitize a tool result string before feeding it to the LLM.
+///
+/// 1. Strips base64 data URIs (≥ 200 char payloads).
+/// 2. Strips long hex sequences (≥ 200 hex chars).
+/// 3. Truncates the result to `max_bytes` (at a char boundary), appending a
+///    truncation marker.
+pub fn sanitize_tool_result(input: &str, max_bytes: usize) -> String {
+    let mut result = strip_base64_blobs(input);
+    result = strip_hex_blobs(&result);
+
+    if result.len() > max_bytes {
+        let original_len = result.len();
+        // Truncate at a char boundary.
+        let mut end = max_bytes;
+        while end > 0 && !result.is_char_boundary(end) {
+            end -= 1;
+        }
+        result.truncate(end);
+        result.push_str(&format!("\n\n[truncated — {original_len} bytes total]"));
+    }
+    result
+}
+
 /// Run the agent loop: send messages to the LLM, execute tool calls, repeat.
 ///
 /// If `history` is provided, those messages are inserted between the system
@@ -584,7 +683,12 @@ pub async fn run_agent_loop_with_context(
                 result
             };
 
-            let tool_result_str = result.to_string();
+            let tool_result_str = sanitize_tool_result(
+                &result.to_string(),
+                moltis_config::discover_and_load()
+                    .tools
+                    .max_tool_result_bytes,
+            );
             debug!(
                 tool = %tc.name,
                 id = %tc.id,
@@ -1469,5 +1573,72 @@ mod tests {
             matches!(err, AgentRunError::Other(_)),
             "expected Other, got: {err:?}"
         );
+    }
+
+    // ── sanitize_tool_result tests ──────────────────────────────────
+
+    #[test]
+    fn test_sanitize_short_input_unchanged() {
+        let input = "hello world";
+        assert_eq!(sanitize_tool_result(input, 50_000), "hello world");
+    }
+
+    #[test]
+    fn test_sanitize_truncates_long_input() {
+        let input = "x".repeat(1000); // 'x' is not all-hex so hex stripper won't touch it
+        let result = sanitize_tool_result(&input, 100);
+        assert!(result.starts_with("xxxx"));
+        assert!(result.contains("[truncated"));
+        assert!(result.contains("1000 bytes total"));
+    }
+
+    #[test]
+    fn test_sanitize_truncate_respects_char_boundary() {
+        // 'é' is 2 bytes in UTF-8. Fill with 'é' so max_bytes falls mid-char.
+        let input = "é".repeat(100); // 200 bytes
+        let result = sanitize_tool_result(&input, 51); // 51 is mid-char
+        assert!(result.contains("[truncated"));
+        // Prefix must be valid UTF-8 (it is, since we got a String back).
+        let prefix_end = result.find("\n\n[truncated").unwrap();
+        assert!(prefix_end <= 51);
+        assert_eq!(prefix_end % 2, 0); // each 'é' is 2 bytes
+    }
+
+    #[test]
+    fn test_sanitize_strips_base64_data_uri() {
+        let payload = "A".repeat(300);
+        let input = format!("before data:image/png;base64,{payload} after");
+        let result = sanitize_tool_result(&input, 50_000);
+        assert!(!result.contains(&payload));
+        assert!(result.contains("[base64 data removed"));
+        assert!(result.contains("before"));
+        assert!(result.contains("after"));
+    }
+
+    #[test]
+    fn test_sanitize_preserves_short_base64() {
+        let payload = "QUFB"; // 4 chars, below threshold
+        let input = format!("data:text/plain;base64,{payload}");
+        let result = sanitize_tool_result(&input, 50_000);
+        assert!(result.contains(payload));
+    }
+
+    #[test]
+    fn test_sanitize_strips_long_hex() {
+        let hex = "a1b2c3d4".repeat(50); // 400 hex chars
+        let input = format!("prefix {hex} suffix");
+        let result = sanitize_tool_result(&input, 50_000);
+        assert!(!result.contains(&hex));
+        assert!(result.contains("[hex data removed"));
+        assert!(result.contains("prefix"));
+        assert!(result.contains("suffix"));
+    }
+
+    #[test]
+    fn test_sanitize_preserves_short_hex() {
+        let hex = "deadbeef"; // 8 chars, below threshold
+        let input = format!("code: {hex}");
+        let result = sanitize_tool_result(&input, 50_000);
+        assert!(result.contains(hex));
     }
 }

@@ -231,10 +231,17 @@ pub struct ToolsConfig {
     /// Maximum wall-clock seconds for an agent run (0 = no timeout). Default 600.
     #[serde(default = "default_agent_timeout_secs")]
     pub agent_timeout_secs: u64,
+    /// Maximum bytes for a single tool result before truncation. Default 50KB.
+    #[serde(default = "default_max_tool_result_bytes")]
+    pub max_tool_result_bytes: usize,
 }
 
 fn default_agent_timeout_secs() -> u64 {
     600
+}
+
+fn default_max_tool_result_bytes() -> usize {
+    50_000
 }
 
 /// Web tools configuration (search, fetch).

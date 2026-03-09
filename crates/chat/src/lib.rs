@@ -1159,12 +1159,21 @@ async fn build_prompt_runtime_context(
     let sandbox_fut = async {
         if let Some(router) = state.sandbox_router() {
             let is_sandboxed = router.is_sandboxed(session_key).await;
+            // Only include sandbox context when sandbox is actually enabled for
+            // this session.  When disabled, omitting it prevents the LLM from
+            // hallucinating sandbox usage (see #360).  This intentionally
+            // discards `session_override` — its only consumer is the prompt
+            // line we are omitting, and no other code reads it from
+            // `PromptSandboxRuntimeContext`.
+            if !is_sandboxed {
+                return None;
+            }
             let config = router.config();
             let backend_name = router.backend_name();
             let workspace_mount = config.workspace_mount.to_string();
             let workspace_path = (workspace_mount != "none").then(|| data_dir_display.clone());
             Some(PromptSandboxRuntimeContext {
-                exec_sandboxed: is_sandboxed,
+                exec_sandboxed: true,
                 mode: Some(config.mode.to_string()),
                 backend: Some(backend_name.to_string()),
                 scope: Some(config.scope.to_string()),
@@ -1176,18 +1185,7 @@ async fn build_prompt_runtime_context(
                 session_override: session_entry.and_then(|entry| entry.sandbox_enabled),
             })
         } else {
-            Some(PromptSandboxRuntimeContext {
-                exec_sandboxed: false,
-                mode: Some("off".to_string()),
-                backend: Some("none".to_string()),
-                scope: None,
-                image: None,
-                home: None,
-                workspace_mount: None,
-                workspace_path: None,
-                no_network: None,
-                session_override: None,
-            })
+            None
         }
     };
 
@@ -1723,9 +1721,10 @@ impl ModelService for LiveModelService {
         let reg = self.providers.read().await;
         let disabled = self.disabled.read().await;
         let order = self.priority_order().await;
+        let all_models = reg.list_models_with_reasoning_variants();
         let prioritized = Self::prioritize_models(
             &order,
-            reg.list_models()
+            all_models
                 .iter()
                 .filter(|m| moltis_providers::is_chat_capable_model(&m.id))
                 .filter(|m| !disabled.is_disabled(&m.id))
@@ -1759,9 +1758,10 @@ impl ModelService for LiveModelService {
         let reg = self.providers.read().await;
         let disabled = self.disabled.read().await;
         let order = self.priority_order().await;
+        let all_models = reg.list_models_with_reasoning_variants();
         let prioritized = Self::prioritize_models(
             &order,
-            reg.list_models()
+            all_models
                 .iter()
                 .filter(|m| moltis_providers::is_chat_capable_model(&m.id)),
         );
@@ -10058,11 +10058,26 @@ mod tests {
 
         let result = service.list().await.unwrap();
         let arr = result.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
+        // 3 base models + 3 reasoning variants for claude-opus-4-5 = 6
+        assert_eq!(arr.len(), 6);
 
         let result = service.list_all().await.unwrap();
         let arr = result.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.len(), 6);
+
+        // Verify reasoning variants are present with correct display names.
+        let ids: Vec<&str> = arr.iter().filter_map(|m| m["id"].as_str()).collect();
+        assert!(ids.contains(&"anthropic::claude-opus-4-5@reasoning-high"));
+        assert!(ids.contains(&"anthropic::claude-opus-4-5@reasoning-medium"));
+        assert!(ids.contains(&"anthropic::claude-opus-4-5@reasoning-low"));
+        let high = arr
+            .iter()
+            .find(|m| m["id"].as_str() == Some("anthropic::claude-opus-4-5@reasoning-high"))
+            .unwrap();
+        assert_eq!(
+            high["displayName"].as_str().unwrap(),
+            "Claude Opus 4.5 (high reasoning)"
+        );
     }
 
     #[tokio::test]

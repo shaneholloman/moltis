@@ -127,6 +127,11 @@ fn to_anthropic_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<serde
     for msg in messages {
         match msg {
             ChatMessage::System { content } => {
+                // All system messages are merged into the top-level `system`
+                // field because Anthropic requires alternating user/assistant
+                // messages and does not allow mid-conversation system messages.
+                // Prompt-cache stability for Anthropic requires `cache_control`
+                // breakpoints, which is a separate optimization.
                 system_text = Some(match system_text {
                     Some(existing) => format!("{existing}\n\n{content}"),
                     None => content.clone(),
@@ -637,5 +642,35 @@ mod tests {
             Some(moltis_agents::model::ReasoningEffort::High)
         );
         assert_eq!(with_effort.id(), "claude-opus-4-5-20251101");
+    }
+
+    #[test]
+    fn to_anthropic_messages_merges_all_system_into_top_level() {
+        use moltis_agents::model::{ChatMessage, UserContent};
+
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::User {
+                content: UserContent::Text("hello".into()),
+            },
+            ChatMessage::system("The current user datetime is 2026-03-24 01:23:45 CET."),
+            ChatMessage::User {
+                content: UserContent::Text("what time is it?".into()),
+            },
+        ];
+
+        let (system_text, out) = to_anthropic_messages(&messages);
+
+        // All system messages are merged into the top-level system field
+        // because Anthropic requires alternating user/assistant messages.
+        assert_eq!(
+            system_text.as_deref(),
+            Some(
+                "You are a helpful assistant.\n\nThe current user datetime is 2026-03-24 01:23:45 CET."
+            )
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[1]["role"], "user");
     }
 }

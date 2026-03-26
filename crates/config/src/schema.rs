@@ -1247,12 +1247,28 @@ fn default_true() -> bool {
 }
 
 /// MCP (Model Context Protocol) server configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpConfig {
+    /// Default timeout for MCP requests in seconds.
+    #[serde(default = "default_mcp_request_timeout_secs")]
+    pub request_timeout_secs: u64,
     /// Configured MCP servers, keyed by server name.
     #[serde(default)]
     pub servers: HashMap<String, McpServerEntry>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_secs: default_mcp_request_timeout_secs(),
+            servers: HashMap::new(),
+        }
+    }
+}
+
+fn default_mcp_request_timeout_secs() -> u64 {
+    30
 }
 
 /// Configuration for a single MCP server.
@@ -1270,6 +1286,9 @@ pub struct McpServerEntry {
     /// Whether this server is enabled. Defaults to true.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Optional per-server MCP request timeout override in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
     /// Transport type: "stdio" (default) or "sse".
     #[serde(default)]
     pub transport: String,
@@ -1282,6 +1301,9 @@ pub struct McpServerEntry {
     /// Manual OAuth override for servers that don't support standard discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpOAuthOverrideEntry>,
+    /// Custom display name for the server (shown in UI instead of technical ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 /// Manual OAuth configuration override for an MCP server.
@@ -1458,6 +1480,17 @@ pub enum MessageQueueMode {
     Collect,
 }
 
+/// How tool schemas are presented to the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolRegistryMode {
+    /// All tool schemas are sent to the model on every turn (default).
+    #[default]
+    Full,
+    /// Only `tool_search` is sent; the model discovers and activates tools on demand.
+    Lazy,
+}
+
 /// Tools configuration (exec, sandbox, policy, web, browser).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1476,6 +1509,9 @@ pub struct ToolsConfig {
     /// Maximum bytes for a single tool result before truncation. Default 50KB.
     #[serde(default = "default_max_tool_result_bytes")]
     pub max_tool_result_bytes: usize,
+    /// How tool schemas are presented to the model. Default "full".
+    #[serde(default)]
+    pub registry_mode: ToolRegistryMode,
 }
 
 impl Default for ToolsConfig {
@@ -1489,6 +1525,7 @@ impl Default for ToolsConfig {
             agent_timeout_secs: default_agent_timeout_secs(),
             agent_max_iterations: default_agent_max_iterations(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
+            registry_mode: ToolRegistryMode::default(),
         }
     }
 }
@@ -2151,6 +2188,17 @@ const fn is_default_tool_mode(v: &ToolMode) -> bool {
     matches!(v, ToolMode::Auto)
 }
 
+/// Wire format for provider HTTP API.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WireApi {
+    /// Standard OpenAI Chat Completions format (`/chat/completions`).
+    #[default]
+    ChatCompletions,
+    /// OpenAI Responses API format (`/responses`).
+    Responses,
+}
+
 /// Streaming transport for provider response streams.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -2199,6 +2247,13 @@ pub struct ProviderEntry {
     #[serde(default, skip_serializing_if = "is_default_provider_stream_transport")]
     pub stream_transport: ProviderStreamTransport,
 
+    /// Wire format for this provider (`chat-completions`, `responses`).
+    ///
+    /// - `chat-completions` (default): standard `/chat/completions` endpoint.
+    /// - `responses`: OpenAI Responses API (`/responses`) format.
+    #[serde(default, skip_serializing_if = "is_default_wire_api")]
+    pub wire_api: WireApi,
+
     /// Optional alias for this provider instance.
     ///
     /// When set, this alias is used in metrics labels instead of the provider name.
@@ -2227,6 +2282,7 @@ impl std::fmt::Debug for ProviderEntry {
             .field("models", &self.models)
             .field("fetch_models", &self.fetch_models)
             .field("stream_transport", &self.stream_transport)
+            .field("wire_api", &self.wire_api)
             .field("alias", &self.alias)
             .field("tool_mode", &self.tool_mode)
             .finish()
@@ -2242,6 +2298,7 @@ impl Default for ProviderEntry {
             models: Vec::new(),
             fetch_models: true,
             stream_transport: ProviderStreamTransport::Sse,
+            wire_api: WireApi::ChatCompletions,
             alias: None,
             tool_mode: ToolMode::Auto,
         }
@@ -2274,6 +2331,10 @@ const fn is_true(value: &bool) -> bool {
 
 const fn is_default_provider_stream_transport(value: &ProviderStreamTransport) -> bool {
     matches!(value, ProviderStreamTransport::Sse)
+}
+
+const fn is_default_wire_api(value: &WireApi) -> bool {
+    matches!(value, WireApi::ChatCompletions)
 }
 
 impl ProvidersConfig {
@@ -2422,6 +2483,33 @@ OPENROUTER_API_KEY = "sk-or-test"
         let config: MoltisConfig = toml::from_str("").unwrap();
         assert!(config.agents.default_preset.is_none());
         assert!(config.agents.presets.is_empty());
+    }
+
+    #[test]
+    fn mcp_config_defaults_request_timeout() {
+        let config: MoltisConfig = toml::from_str("").unwrap();
+        assert_eq!(config.mcp.request_timeout_secs, 30);
+    }
+
+    #[test]
+    fn mcp_server_entry_parses_request_timeout_override() {
+        let config: MoltisConfig = toml::from_str(
+            r#"
+[mcp.servers.memory]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+request_timeout_secs = 75
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .mcp
+                .servers
+                .get("memory")
+                .and_then(|entry| entry.request_timeout_secs),
+            Some(75)
+        );
     }
 
     #[test]
@@ -2793,6 +2881,79 @@ tool_mode = "native"
         assert_eq!(
             config.providers.get("anthropic").unwrap().tool_mode,
             ToolMode::Native
+        );
+    }
+
+    #[test]
+    fn wire_api_serde_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&WireApi::ChatCompletions).unwrap(),
+            "\"chat-completions\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WireApi::Responses).unwrap(),
+            "\"responses\""
+        );
+        assert_eq!(
+            serde_json::from_str::<WireApi>("\"chat-completions\"").unwrap(),
+            WireApi::ChatCompletions
+        );
+        assert_eq!(
+            serde_json::from_str::<WireApi>("\"responses\"").unwrap(),
+            WireApi::Responses
+        );
+    }
+
+    #[test]
+    fn wire_api_default_is_chat_completions() {
+        assert_eq!(WireApi::default(), WireApi::ChatCompletions);
+    }
+
+    #[test]
+    fn provider_entry_wire_api_from_toml() {
+        let toml_str = r#"
+[providers.custom-mn]
+enabled = true
+base_url = "https://gmn.example.com/v1"
+wire_api = "responses"
+models = ["gpt-5.3-codex"]
+"#;
+        let config: MoltisConfig = toml::from_str(toml_str).unwrap();
+        let entry = config.providers.get("custom-mn").unwrap();
+        assert_eq!(entry.wire_api, WireApi::Responses);
+    }
+
+    #[test]
+    fn provider_entry_wire_api_defaults_to_chat_completions() {
+        let toml_str = r#"
+[providers.openai]
+enabled = true
+"#;
+        let config: MoltisConfig = toml::from_str(toml_str).unwrap();
+        let entry = config.providers.get("openai").unwrap();
+        assert_eq!(entry.wire_api, WireApi::ChatCompletions);
+    }
+
+    #[test]
+    fn provider_entry_wire_api_skip_serializing_default() {
+        let entry = ProviderEntry::default();
+        let serialized = toml::to_string(&entry).unwrap();
+        assert!(
+            !serialized.contains("wire_api"),
+            "default wire_api should be skipped in serialization"
+        );
+    }
+
+    #[test]
+    fn provider_entry_wire_api_serializes_responses() {
+        let entry = ProviderEntry {
+            wire_api: WireApi::Responses,
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&entry).unwrap();
+        assert!(
+            serialized.contains("wire_api = \"responses\""),
+            "non-default wire_api should be serialized"
         );
     }
 }

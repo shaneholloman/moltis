@@ -791,37 +791,9 @@ fn infer_reply_medium(params: &Value, text: &str) -> ReplyMedium {
     ReplyMedium::Text
 }
 
-fn runtime_datetime_prompt_tail(runtime_context: Option<&PromptRuntimeContext>) -> Option<String> {
-    let runtime = runtime_context?;
-    if let Some(time) = runtime
-        .host
-        .time
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        return Some(format!("\nThe current user datetime is {time}.\n"));
-    }
-    runtime
-        .host
-        .today
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(|today| format!("\nThe current user date is {today}.\n"))
-}
-
-fn apply_voice_reply_suffix(
-    system_prompt: String,
-    desired_reply_medium: ReplyMedium,
-    runtime_context: Option<&PromptRuntimeContext>,
-) -> String {
+fn apply_voice_reply_suffix(system_prompt: String, desired_reply_medium: ReplyMedium) -> String {
     if desired_reply_medium != ReplyMedium::Voice {
         return system_prompt;
-    }
-
-    if let Some(tail) = runtime_datetime_prompt_tail(runtime_context)
-        && let Some(prefix) = system_prompt.strip_suffix(&tail)
-    {
-        return format!("{prefix}{VOICE_REPLY_SUFFIX}{tail}");
     }
 
     format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
@@ -1258,12 +1230,7 @@ async fn build_prompt_runtime_context(
                     platform: n.platform,
                     capabilities: n.capabilities,
                     cpu_count: n.cpu_count,
-                    cpu_usage: n.cpu_usage,
                     mem_total: n.mem_total,
-                    mem_available: n.mem_available,
-                    telemetry_stale: n.telemetry_stale,
-                    disk_total: n.disk_total,
-                    disk_available: n.disk_available,
                     runtimes: n.runtimes,
                     providers: n.providers,
                 })
@@ -5392,7 +5359,7 @@ async fn run_explicit_shell_command(
 
     let exec_tool = {
         let registry = tool_registry.read().await;
-        registry.get_arc("exec")
+        registry.get("exec")
     };
 
     let exec_result = match exec_tool {
@@ -5995,6 +5962,14 @@ async fn run_with_tools(
     if tools_enabled && let Some(manager) = state.memory_manager() {
         install_agent_scoped_memory_tools(&mut filtered_registry, manager, agent_id);
     }
+    if tools_enabled
+        && matches!(
+            persona.config.tools.registry_mode,
+            moltis_config::ToolRegistryMode::Lazy
+        )
+    {
+        filtered_registry = moltis_agents::lazy_tools::wrap_registry_lazy(filtered_registry);
+    }
 
     // Build system prompt:
     // - Native tools: full prompt with tool schemas sent via API
@@ -6028,9 +6003,7 @@ async fn run_with_tools(
     };
 
     // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
-    // Keep the runtime datetime/date sentence as the final prompt line for better cache locality.
-    let system_prompt =
-        apply_voice_reply_suffix(system_prompt, desired_reply_medium, runtime_context);
+    let system_prompt = apply_voice_reply_suffix(system_prompt, desired_reply_medium);
 
     // Determine sandbox mode for this session.
     let session_is_sandboxed = if let Some(router) = state.sandbox_router() {
@@ -6181,6 +6154,58 @@ async fn run_with_tools(
                         .and_then(|c| c.as_str())
                         .map(String::from);
 
+                    // Check for document file to send to channel.
+                    // New path: `document_ref` (lightweight media-dir reference).
+                    // Legacy path: `document` with `data:` URI.
+                    let document_ref_to_send = result
+                        .as_ref()
+                        .and_then(|r| r.get("document_ref"))
+                        .and_then(|d| d.as_str())
+                        .map(String::from);
+
+                    let document_ref_mime = if document_ref_to_send.is_some() {
+                        result
+                            .as_ref()
+                            .and_then(|r| r.get("mime_type"))
+                            .and_then(|m| m.as_str())
+                            .map(String::from)
+                    } else {
+                        None
+                    };
+
+                    let document_to_send = if document_ref_to_send.is_none() {
+                        result
+                            .as_ref()
+                            .and_then(|r| r.get("document"))
+                            .and_then(|d| d.as_str())
+                            .filter(|d| d.starts_with("data:"))
+                            .map(String::from)
+                    } else {
+                        None
+                    };
+
+                    let has_document = document_ref_to_send.is_some() || document_to_send.is_some();
+
+                    let document_filename = if has_document {
+                        result
+                            .as_ref()
+                            .and_then(|r| r.get("filename"))
+                            .and_then(|f| f.as_str())
+                            .map(String::from)
+                    } else {
+                        None
+                    };
+
+                    let document_caption = if has_document {
+                        result
+                            .as_ref()
+                            .and_then(|r| r.get("caption"))
+                            .and_then(|c| c.as_str())
+                            .map(String::from)
+                    } else {
+                        None
+                    };
+
                     // Extract location from show_map results for native pin
                     let location_to_send = if name == "show_map" {
                         result.as_ref().and_then(|r| {
@@ -6207,6 +6232,15 @@ async fn run_with_tools(
                                 );
                                 capped[*field] = Value::String(truncated);
                             }
+                        }
+                        // Cap legacy document data URIs — the LLM never sees
+                        // these and the UI doesn't render them.
+                        if let Some(doc) = capped.get("document").and_then(|v| v.as_str())
+                            && doc.starts_with("data:")
+                            && doc.len() > 200
+                        {
+                            capped["document"] =
+                                Value::String("[document data omitted]".to_string());
                         }
                         payload["result"] = capped;
                     }
@@ -6239,6 +6273,43 @@ async fn run_with_tools(
                                 image_caption.as_deref(),
                             )
                             .await;
+                        });
+                    }
+
+                    // Send document to channel targets if present.
+                    if let Some(media_ref) = document_ref_to_send {
+                        // New path: read from media dir at upload time.
+                        let state_clone = Arc::clone(&state);
+                        let sk_clone = sk.clone();
+                        let store_clone = store.clone();
+                        let mime = document_ref_mime
+                            .unwrap_or_else(|| "application/octet-stream".to_string());
+                        tokio::spawn(async move {
+                            if let Some(payload) = document_payload_from_ref(
+                                store_clone.as_ref(),
+                                &sk_clone,
+                                &media_ref,
+                                &mime,
+                                document_filename.as_deref(),
+                                document_caption.as_deref(),
+                            )
+                            .await
+                            {
+                                dispatch_document_to_channels(&state_clone, &sk_clone, payload)
+                                    .await;
+                            }
+                        });
+                    } else if let Some(document_data) = document_to_send {
+                        // Legacy fallback: data URI.
+                        let state_clone = Arc::clone(&state);
+                        let sk_clone = sk.clone();
+                        let payload = document_payload_from_data_uri(
+                            &document_data,
+                            document_filename.as_deref(),
+                            document_caption.as_deref(),
+                        );
+                        tokio::spawn(async move {
+                            dispatch_document_to_channels(&state_clone, &sk_clone, payload).await;
                         });
                     }
 
@@ -6292,9 +6363,19 @@ async fn run_with_tools(
                                 .get("screenshot")
                                 .and_then(|v| v.as_str())
                                 .is_some_and(|s| s.starts_with("data:"));
+                            // Strip legacy document data URIs — they are only
+                            // needed by the channel dispatch (already extracted
+                            // above) and should not be persisted.
+                            let strip_document = r
+                                .get("document")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|s| s.starts_with("data:"));
                             if let Some(obj) = r.as_object_mut() {
                                 if strip_screenshot {
                                     obj.remove("screenshot");
+                                }
+                                if strip_document {
+                                    obj.remove("document");
                                 }
                                 obj.remove("screenshot_scale");
                             }
@@ -6450,7 +6531,15 @@ async fn run_with_tools(
         .insert(session_key.to_string(), event_forwarder);
 
     // Convert persisted JSON history to typed ChatMessages for the LLM provider.
-    let chat_history = values_to_chat_messages(history_raw);
+    let mut chat_history = values_to_chat_messages(history_raw);
+
+    // Inject the datetime as a trailing system message so the main system
+    // prompt stays byte-identical between turns, enabling KV cache hits for
+    // local LLMs (Ollama, LM Studio) and prompt-cache hits for cloud providers.
+    if let Some(datetime_msg) = moltis_agents::prompt::runtime_datetime_message(runtime_context) {
+        chat_history.push(ChatMessage::system(&datetime_msg));
+    }
+
     let hist = if chat_history.is_empty() {
         None
     } else {
@@ -6526,7 +6615,13 @@ async fn run_with_tools(
 
                     // Reload compacted history and retry.
                     let compacted_history_raw = store.read(session_key).await.unwrap_or_default();
-                    let compacted_chat = values_to_chat_messages(&compacted_history_raw);
+                    let mut compacted_chat = values_to_chat_messages(&compacted_history_raw);
+                    // Re-inject datetime so the retry has current time context.
+                    if let Some(datetime_msg) =
+                        moltis_agents::prompt::runtime_datetime_message(runtime_context)
+                    {
+                        compacted_chat.push(ChatMessage::system(&datetime_msg));
+                    }
                     let retry_hist = if compacted_chat.is_empty() {
                         None
                     } else {
@@ -6942,14 +7037,17 @@ async fn run_streaming(
     );
 
     // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
-    // Keep the runtime datetime/date sentence as the final prompt line for better cache locality.
-    let system_prompt =
-        apply_voice_reply_suffix(system_prompt, desired_reply_medium, runtime_context);
+    let system_prompt = apply_voice_reply_suffix(system_prompt, desired_reply_medium);
 
     let mut messages: Vec<ChatMessage> = Vec::new();
     messages.push(ChatMessage::system(system_prompt));
     // Convert persisted JSON history to typed ChatMessages for the LLM provider.
     messages.extend(values_to_chat_messages(history_raw));
+    // Inject datetime as a trailing system message so the main system prompt
+    // stays byte-identical between turns (KV cache / prompt cache locality).
+    if let Some(datetime_msg) = moltis_agents::prompt::runtime_datetime_message(runtime_context) {
+        messages.push(ChatMessage::system(&datetime_msg));
+    }
     messages.push(ChatMessage::User {
         content: user_content.clone(),
     });
@@ -7972,6 +8070,7 @@ async fn build_tts_payload(
         media: Some(MediaAttachment {
             url: format!("data:{mime_type};base64,{}", response.audio),
             mime_type,
+            filename: None,
         }),
         reply_to_id: None,
         silent: false,
@@ -8215,6 +8314,7 @@ async fn send_screenshot_to_channels(
         media: Some(MediaAttachment {
             url: screenshot_data.to_string(),
             mime_type,
+            filename: None,
         }),
         reply_to_id: None,
         silent: false,
@@ -8257,6 +8357,139 @@ async fn send_screenshot_to_channels(
             warn!(error = %e, "channel reply task join failed");
         }
     }
+}
+
+/// Send a document payload to all pending channel targets for a session.
+/// Uses `peek_channel_replies` so targets remain for the final text response.
+async fn dispatch_document_to_channels(
+    state: &Arc<dyn ChatRuntime>,
+    session_key: &str,
+    payload: moltis_common::types::ReplyPayload,
+) {
+    let targets = state.peek_channel_replies(session_key).await;
+    if targets.is_empty() {
+        return;
+    }
+
+    let outbound = match state.channel_outbound() {
+        Some(o) => o,
+        None => return,
+    };
+
+    let mut tasks = Vec::with_capacity(targets.len());
+    for target in targets {
+        let outbound = Arc::clone(&outbound);
+        let payload = payload.clone();
+        tasks.push(tokio::spawn(async move {
+            let reply_to = target.message_id.as_deref();
+            if let Err(e) = outbound
+                .send_media(&target.account_id, &target.chat_id, &payload, reply_to)
+                .await
+            {
+                warn!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    "failed to send document to channel: {e}"
+                );
+                let error_msg = format!("\u{26a0}\u{fe0f} Failed to send document: {e}");
+                let _ = outbound
+                    .send_text(&target.account_id, &target.chat_id, &error_msg, reply_to)
+                    .await;
+            } else {
+                debug!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    "sent document to channel"
+                );
+            }
+        }));
+    }
+
+    for task in tasks {
+        if let Err(e) = task.await {
+            warn!(error = %e, "channel document task join failed");
+        }
+    }
+}
+
+/// Build a `ReplyPayload` from a data URI (legacy path).
+fn document_payload_from_data_uri(
+    data_uri: &str,
+    filename: Option<&str>,
+    caption: Option<&str>,
+) -> moltis_common::types::ReplyPayload {
+    use moltis_common::types::{MediaAttachment, ReplyPayload};
+
+    let mime_type = data_uri
+        .strip_prefix("data:")
+        .and_then(|s| s.split(';').next())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    ReplyPayload {
+        text: caption.unwrap_or_default().to_string(),
+        media: Some(MediaAttachment {
+            url: data_uri.to_string(),
+            mime_type,
+            filename: filename.map(String::from),
+        }),
+        reply_to_id: None,
+        silent: false,
+    }
+}
+
+/// Build a `ReplyPayload` by reading from the session media directory.
+/// Returns `None` if the store is unavailable or the read fails.
+async fn document_payload_from_ref(
+    session_store: Option<&Arc<SessionStore>>,
+    session_key: &str,
+    media_ref: &str,
+    mime_type: &str,
+    filename: Option<&str>,
+    caption: Option<&str>,
+) -> Option<moltis_common::types::ReplyPayload> {
+    use moltis_common::types::{MediaAttachment, ReplyPayload};
+
+    let store = match session_store {
+        Some(s) => s,
+        None => {
+            warn!("document_payload_from_ref: no session store available");
+            return None;
+        },
+    };
+
+    let ref_filename = match media_ref.rsplit('/').next() {
+        Some(f) => f,
+        None => {
+            warn!(media_ref, "invalid document_ref path");
+            return None;
+        },
+    };
+
+    let bytes = match store.read_media(session_key, ref_filename).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(media_ref, error = %e, "failed to read document from media dir");
+            return None;
+        },
+    };
+
+    let b64 = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    };
+    let data_uri = format!("data:{mime_type};base64,{b64}");
+
+    Some(ReplyPayload {
+        text: caption.unwrap_or_default().to_string(),
+        media: Some(MediaAttachment {
+            url: data_uri,
+            mime_type: mime_type.to_string(),
+            filename: filename.map(String::from),
+        }),
+        reply_to_id: None,
+        silent: false,
+    })
 }
 
 /// Send a native location pin to all pending channel targets for a session.
@@ -9008,37 +9241,18 @@ mod tests {
     }
 
     #[test]
-    fn apply_voice_reply_suffix_keeps_datetime_tail_at_end() {
-        let runtime_context = PromptRuntimeContext {
-            host: PromptHostRuntimeContext {
-                time: Some("2026-02-17 16:18:00 CET".to_string()),
-                ..Default::default()
-            },
-            sandbox: None,
-            nodes: None,
-        };
-        let base_prompt =
-            "You are a helpful assistant.\nThe current user datetime is 2026-02-17 16:18:00 CET.\n"
-                .to_string();
+    fn apply_voice_reply_suffix_appends_voice_section() {
+        let base_prompt = "You are a helpful assistant.".to_string();
 
-        let prompt =
-            apply_voice_reply_suffix(base_prompt, ReplyMedium::Voice, Some(&runtime_context));
+        let prompt = apply_voice_reply_suffix(base_prompt, ReplyMedium::Voice);
 
         assert!(prompt.contains("## Voice Reply Mode"));
-        assert!(
-            prompt
-                .trim_end()
-                .ends_with("The current user datetime is 2026-02-17 16:18:00 CET.")
-        );
-        let voice_ix = prompt.find("## Voice Reply Mode");
-        let datetime_ix = prompt.rfind("The current user datetime is 2026-02-17 16:18:00 CET.");
-        assert!(voice_ix.is_some_and(|idx| datetime_ix.is_some_and(|tail| idx < tail)));
     }
 
     #[test]
     fn apply_voice_reply_suffix_noop_for_text_reply_mode() {
         let base_prompt = "You are a helpful assistant.".to_string();
-        let prompt = apply_voice_reply_suffix(base_prompt.clone(), ReplyMedium::Text, None);
+        let prompt = apply_voice_reply_suffix(base_prompt.clone(), ReplyMedium::Text);
         assert_eq!(prompt, base_prompt);
     }
 
@@ -10559,14 +10773,8 @@ mod tests {
         let skills = vec![moltis_skills::types::SkillMetadata {
             name: "my-skill".into(),
             description: "test".into(),
-            license: None,
-            compatibility: None,
             allowed_tools: vec!["Bash(git:*)".into()],
-            homepage: None,
-            dockerfile: None,
-            requires: Default::default(),
-            path: PathBuf::new(),
-            source: None,
+            ..Default::default()
         }];
 
         let filtered = apply_runtime_tool_filters(&registry, &cfg, &skills, false);
@@ -10592,14 +10800,8 @@ mod tests {
         let skills = vec![moltis_skills::types::SkillMetadata {
             name: "weather".into(),
             description: "weather checker".into(),
-            license: None,
-            compatibility: None,
             allowed_tools: vec!["WebFetch".into()],
-            homepage: None,
-            dockerfile: None,
-            requires: Default::default(),
-            path: PathBuf::new(),
-            source: None,
+            ..Default::default()
         }];
 
         let filtered = apply_runtime_tool_filters(&registry, &cfg, &skills, false);

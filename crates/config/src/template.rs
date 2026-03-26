@@ -206,6 +206,7 @@ message_queue_mode = "followup"   # Default: process queued messages one-by-one 
 agent_timeout_secs = 600          # Max seconds for an agent run (0 = no timeout)
 agent_max_iterations = 25         # Max LLM/tool loop iterations before stopping
 max_tool_result_bytes = 50000     # Max bytes per tool result before truncation (50KB)
+# registry_mode = "full"          # "full" = all schemas every turn, "lazy" = tool_search discovery
 
 # ── Maps ─────────────────────────────────────────────────────────────────────
 
@@ -441,6 +442,7 @@ enable_agent_sidecar_files = false # Allow agents to write supplementary text fi
 # See https://modelcontextprotocol.io for available servers.
 
 [mcp]
+request_timeout_secs = 30        # Default timeout for MCP requests
 # Each server has a name and configuration:
 #
 # [mcp.servers.server-name]
@@ -448,6 +450,7 @@ enable_agent_sidecar_files = false # Allow agents to write supplementary text fi
 # args = ["-y", "@package/name"]  # Command arguments
 # env = {{ KEY = "value" }}         # Environment variables for the process
 # enabled = true                  # Whether this server is enabled
+# request_timeout_secs = 90       # Optional timeout override for this server
 # transport = "stdio"             # Transport: "stdio" (default) or "sse"
 # url = "http://..."              # URL for SSE transport
 # headers = {{ Authorization = "Bearer ${{TOKEN}}" }}  # Optional HTTP headers for SSE transport
@@ -578,6 +581,20 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # External messaging integrations.
 
 [channels]
+# Which channel types appear in the web UI's "+ Add Channel" menu.
+# Default: ["telegram", "discord", "slack"]
+# Add "whatsapp" or "msteams" to enable them in the UI.
+# offered = ["telegram", "discord", "slack", "whatsapp"]
+
+# WhatsApp linked-device accounts
+# [channels.whatsapp.my-bot]
+# dm_policy = "open"              # "open", "allowlist", or "disabled"
+# group_policy = "disabled"       # "open", "allowlist", or "disabled"
+# model = "anthropic/claude-sonnet-4-20250514"
+# model_provider = "anthropic"
+# otp_self_approval = true        # OTP self-approval for non-allowlisted DM users
+# otp_cooldown_secs = 300         # Cooldown after 3 failed OTP attempts
+
 # Telegram bots
 # [channels.telegram.my-bot]
 # token = "..."                   # Bot token from @BotFather

@@ -11,6 +11,11 @@ on:
         required: false
         default: false
         type: boolean
+      pre_release:
+        description: "Publish as pre-release (builds and uploads artifacts but skips Homebrew tap, deploy templates, and releases.json updates)"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,6 +26,7 @@ permissions: {}
 env:
   NIGHTLY_TOOLCHAIN: nightly-2025-11-30
   RELEASE_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+  RELEASE_PRE_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.pre_release && 'true' || 'false' }}
 
 jobs:
   zizmor:
@@ -126,7 +132,11 @@ jobs:
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}
         run: |
           apt-get update
-          apt-get install -y curl git cmake build-essential clang libclang-dev pkg-config ca-certificates
+          apt-get install -y curl git cmake build-essential clang libclang-dev pkg-config ca-certificates wget gpg
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+          echo "deb https://packages.lunarg.com/vulkan jammy main" | tee /etc/apt/sources.list.d/lunarg-vulkan-jammy.list
+          apt-get update
+          apt-get install -y vulkan-sdk
           nvcc --version
       - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}
@@ -1266,6 +1276,7 @@ jobs:
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
           files: release-files/*
+          prerelease: ${{ env.RELEASE_PRE_RELEASE == 'true' }}
 
   # Generate SBOM for the entire release
   generate-sbom:
@@ -1319,7 +1330,7 @@ jobs:
     needs:
       - upload-release
       - merge-docker
-    if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+    if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && (inputs.dry_run || inputs.pre_release))
     runs-on: ubuntu-latest
     name: Update Homebrew tap
     permissions:
@@ -1424,7 +1435,7 @@ jobs:
 
   update-deploy-tags:
     needs: merge-docker
-    if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+    if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && (inputs.dry_run || inputs.pre_release))
     runs-on: ubuntu-latest
     name: Update deploy template tags
     permissions:

@@ -330,7 +330,8 @@ jobs:
       - name: Build .deb package
         env:
           BUILD_TARGET: ${{ matrix.target }}
-        run: cargo deb -p moltis --no-build --target "$BUILD_TARGET"
+          MOLTIS_VERSION: ${{ steps.release_version.outputs.version }}
+        run: cargo deb -p moltis --no-build --target "$BUILD_TARGET" --deb-version "$MOLTIS_VERSION"
 
       - name: Sign with Sigstore and generate checksums
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}
@@ -418,7 +419,8 @@ jobs:
       - name: Build .rpm package
         env:
           BUILD_TARGET: ${{ matrix.target }}
-        run: cargo generate-rpm -p crates/cli --target "$BUILD_TARGET"
+          MOLTIS_VERSION: ${{ steps.release_version.outputs.version }}
+        run: cargo generate-rpm -p crates/cli --target "$BUILD_TARGET" --set-metadata="version=\"$MOLTIS_VERSION\""
 
       - name: Sign with Sigstore and generate checksums
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}

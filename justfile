@@ -402,3 +402,8 @@ courier-deploy:
 # Run the APNS push relay (dev).
 courier-run *ARGS:
     cargo run -p moltis-courier -- {{ARGS}}
+
+# Serve the website locally with SSR partial injection (default port 4000).
+website-dev:
+    node website/scripts/build-changelog.mjs
+    node website/scripts/dev-server.mjs

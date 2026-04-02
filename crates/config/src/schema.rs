@@ -2180,6 +2180,12 @@ pub struct ProvidersConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub offered: Vec<String>,
 
+    /// Show models older than one year in the chat model selector.
+    /// By default only recent models are shown; legacy models remain
+    /// accessible in the settings page regardless of this flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_legacy_models: bool,
+
     /// Provider-specific settings keyed by provider name.
     /// Known keys: "anthropic", "openai", "gemini", "groq", "xai", "deepseek"
     #[serde(flatten)]
@@ -2387,6 +2393,10 @@ where
 
 const fn is_true(value: &bool) -> bool {
     *value
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 const fn is_default_provider_stream_transport(value: &ProviderStreamTransport) -> bool {

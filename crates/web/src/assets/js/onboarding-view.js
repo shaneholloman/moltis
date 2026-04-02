@@ -19,7 +19,7 @@ import {
 import { EmojiPicker } from "./emoji-picker.js";
 import { eventListeners, onEvent } from "./events.js";
 import { get as getGon, refresh as refreshGon } from "./gon.js";
-import { sendRpc } from "./helpers.js";
+import { modelVersionScore, sendRpc } from "./helpers.js";
 import { t } from "./i18n.js";
 import { updateIdentity, validateIdentityFields } from "./identity-utils.js";
 import { detectPasskeyName } from "./passkey-detect.js";
@@ -695,16 +695,18 @@ var OPENAI_COMPATIBLE = ["openai", "mistral", "openrouter", "cerebras", "minimax
 var BYOM_PROVIDERS = ["venice"];
 
 function ModelSelectCard({ model, selected, probe, onToggle }) {
+	var probeError = probe && probe !== "ok" && probe !== "probing" ? probe.error || "" : "";
 	return html`<div class="model-card ${selected ? "selected" : ""}" onClick=${onToggle}>
 		<div class="flex flex-wrap items-center justify-between gap-2">
 			<span class="text-sm font-medium text-[var(--text)]">${model.displayName}</span>
 			<div class="flex flex-wrap gap-2 justify-end">
 				${model.supportsTools ? html`<span class="recommended-badge">Tools</span>` : null}
 				${probe === "probing" ? html`<span class="tier-badge">Probing\u2026</span>` : null}
-				${probe && probe !== "ok" && probe !== "probing" ? html`<span class="provider-item-badge warning" title=${probe.error || ""}>Unsupported</span>` : null}
+				${probeError ? html`<span class="provider-item-badge warning">Unsupported</span>` : null}
 			</div>
 		</div>
 		<div class="text-xs text-[var(--muted)] mt-1 font-mono">${model.id}</div>
+		${probeError ? html`<div class="text-xs font-medium text-[var(--danger,#ef4444)] mt-0.5">${probeError}</div>` : null}
 		${model.createdAt ? html`<time class="text-xs text-[var(--muted)] mt-0.5 opacity-60 block" data-epoch-ms=${model.createdAt * 1000} data-format="year-month"></time>` : null}
 	</div>`;
 }
@@ -775,13 +777,34 @@ function OnboardingProviderRow({
 	var needsModel = BYOM_PROVIDERS.includes(provider.name);
 	var keyHelp = providerApiKeyHelp(provider);
 
+	var [showAllModels, setShowAllModels] = useState(false);
+	var DEFAULT_VISIBLE = 3;
+
+	// Sort models: recommended > newest date > highest version > alpha.
+	var sortedModels = (providerModels || []).slice().sort((a, b) => {
+		var aRec = a.recommended ? 1 : 0;
+		var bRec = b.recommended ? 1 : 0;
+		if (aRec !== bRec) return bRec - aRec;
+		var aTime = a.createdAt || 0;
+		var bTime = b.createdAt || 0;
+		if (aTime !== bTime) return bTime - aTime;
+		var aVer = modelVersionScore(a.id);
+		var bVer = modelVersionScore(b.id);
+		if (aVer !== bVer) return bVer - aVer;
+		return (a.displayName || a.id).localeCompare(b.displayName || b.id);
+	});
+
 	// Filter models for the model selector.
-	var filteredModels = (providerModels || []).filter(
+	var filteredModels = sortedModels.filter(
 		(m) =>
 			!modelSearch ||
 			m.displayName.toLowerCase().includes(modelSearch.toLowerCase()) ||
 			m.id.toLowerCase().includes(modelSearch.toLowerCase()),
 	);
+
+	var hasMoreModels = filteredModels.length > DEFAULT_VISIBLE && !modelSearch;
+	var visibleModels = showAllModels || modelSearch ? filteredModels : filteredModels.slice(0, DEFAULT_VISIBLE);
+	var hiddenModelCount = filteredModels.length - DEFAULT_VISIBLE;
 
 	return html`<div ref=${rowRef} class="rounded-md border border-[var(--border)] bg-[var(--surface)] p-3">
 		<div class="flex items-center gap-3">
@@ -879,14 +902,22 @@ function OnboardingProviderRow({
 				}
 				<div class="flex flex-col gap-1">
 					${
-						filteredModels.length === 0
+						visibleModels.length === 0
 							? html`<div class="text-xs text-[var(--muted)] py-4 text-center">No models match your search.</div>`
-							: filteredModels.map(
+							: visibleModels.map(
 									(m) => html`<${ModelSelectCard} key=${m.id} model=${m}
 										selected=${selectedModels.has(m.id)}
 										probe=${probeResults.get(m.id)}
 										onToggle=${() => onToggleModel(m.id)} />`,
 								)
+					}
+					${
+						hasMoreModels
+							? html`<button
+						class="text-xs text-[var(--accent)] cursor-pointer bg-transparent border-none py-1 text-left hover:underline"
+						onClick=${() => setShowAllModels(!showAllModels)}
+					>${showAllModels ? t("providers:showFewerModels") : t("providers:showAllModels", { count: hiddenModelCount })}</button>`
+							: null
 					}
 				</div>
 				<div class="text-xs text-[var(--muted)]">${selectedModels.size === 0 ? "No models selected" : `${selectedModels.size} model${selectedModels.size > 1 ? "s" : ""} selected`}</div>

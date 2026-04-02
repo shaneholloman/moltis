@@ -103,7 +103,7 @@ const KNOWN_PROVIDER_NAMES: &[&str] = &[
 ];
 
 /// Static metadata keys allowed directly under `[providers]`.
-const PROVIDERS_META_KEYS: &[&str] = &["offered"];
+const PROVIDERS_META_KEYS: &[&str] = &["offered", "show_legacy_models"];
 
 /// Build the full schema map mirroring every field in `schema.rs`.
 fn build_schema_map() -> KnownKeys {
@@ -367,7 +367,10 @@ fn build_schema_map() -> KnownKeys {
         ),
         ("providers", MapWithFields {
             value: Box::new(provider_entry()),
-            fields: HashMap::from([("offered", Array(Box::new(Leaf)))]),
+            fields: HashMap::from([
+                ("offered", Array(Box::new(Leaf))),
+                ("show_legacy_models", Leaf),
+            ]),
         }),
         (
             "chat",

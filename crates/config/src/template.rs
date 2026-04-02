@@ -93,6 +93,7 @@ auto_generate = true              # Auto-generate local CA and server certificat
 
 [providers]
 offered = ["local-llm", "github-copilot", "openai-codex", "openai", "anthropic", "openrouter", "ollama", "moonshot", "minimax", "zai"] # Enabled providers and those shown in onboarding/picker UI ([] = enable/show all)
+# show_legacy_models = true  # Show models older than 1 year in the chat model selector (they always appear in Settings)
 # All available providers:
 #   "anthropic", "openai", "gemini", "groq", "xai", "deepseek",
 #   "fireworks", "mistral", "openrouter", "cerebras", "minimax",

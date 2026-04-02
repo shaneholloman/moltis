@@ -1414,11 +1414,14 @@ pub async fn prepare_gateway_core(
         crate::chat::DisabledModelsStore::load(),
     ));
 
-    let live_model_service = Arc::new(LiveModelService::new(
-        Arc::clone(&registry),
-        Arc::clone(&model_store),
-        config.chat.priority_models.clone(),
-    ));
+    let live_model_service = Arc::new(
+        LiveModelService::new(
+            Arc::clone(&registry),
+            Arc::clone(&model_store),
+            config.chat.priority_models.clone(),
+        )
+        .with_show_legacy_models(config.providers.show_legacy_models),
+    );
     services = services
         .with_model(Arc::clone(&live_model_service) as Arc<dyn crate::services::ModelService>);
 
@@ -4789,6 +4792,7 @@ mod tests {
                 provider: "openai".into(),
                 display_name: "Remote Model".into(),
                 created_at: None,
+                recommended: false,
             },
             remote_provider,
         );

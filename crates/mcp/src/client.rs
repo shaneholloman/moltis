@@ -214,8 +214,11 @@ impl McpClientTrait for McpClient {
         self.ensure_ready()?;
 
         let resp = self.transport.request("tools/list", None).await?;
-        let result: ToolsListResult =
+        let mut result: ToolsListResult =
             serde_json::from_value(resp.result.context("tools/list returned no result")?)?;
+        result
+            .tools
+            .sort_by(|left, right| left.name.cmp(&right.name));
 
         debug!(
             server = %self.server_name,
@@ -302,7 +305,40 @@ impl McpClientTrait for McpClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, std::sync::Arc};
+
+    use {
+        async_trait::async_trait,
+        serde_json::{Value, json},
+    };
+
+    use crate::{error::Result, traits::McpTransport, types::JsonRpcResponse};
+
+    struct StubTransport {
+        result: Value,
+    }
+
+    #[async_trait]
+    impl McpTransport for StubTransport {
+        async fn request(&self, _method: &str, _params: Option<Value>) -> Result<JsonRpcResponse> {
+            Ok(JsonRpcResponse {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                result: Some(self.result.clone()),
+                error: None,
+            })
+        }
+
+        async fn notify(&self, _method: &str, _params: Option<Value>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn is_alive(&self) -> bool {
+            true
+        }
+
+        async fn kill(&self) {}
+    }
 
     #[test]
     fn test_client_state_debug() {
@@ -313,5 +349,29 @@ mod tests {
             "Authenticating"
         );
         assert_eq!(format!("{:?}", McpClientState::Closed), "Closed");
+    }
+
+    #[tokio::test]
+    async fn test_list_tools_sorts_by_name() {
+        let transport = Arc::new(StubTransport {
+            result: json!({
+                "tools": [
+                    {"name": "zeta", "description": "Z", "inputSchema": {"type": "object"}},
+                    {"name": "alpha", "description": "A", "inputSchema": {"type": "object"}},
+                    {"name": "mu", "description": "M", "inputSchema": {"type": "object"}}
+                ]
+            }),
+        });
+        let mut client = McpClient {
+            server_name: "test".into(),
+            transport,
+            state: McpClientState::Ready,
+            server_info: None,
+            tools: Vec::new(),
+        };
+
+        let tools = client.list_tools().await.unwrap();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "mu", "zeta"]);
     }
 }

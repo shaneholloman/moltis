@@ -76,7 +76,7 @@ export async function validateProviderKey(provider, apiKey, baseUrl, model, requ
 	if (!res?.ok) {
 		return {
 			valid: false,
-			error: humanizeProbeError(res?.error?.message || "Failed to validate credentials."),
+			error: humanizeProbeError(res?.error?.serverMessage || res?.error?.message || "Failed to validate credentials."),
 		};
 	}
 
@@ -151,7 +151,7 @@ export async function validateProviderConnection(providerName) {
 	if (!res?.ok) {
 		return {
 			ok: false,
-			message: res?.error?.message || "Failed to validate provider credentials.",
+			message: res?.error?.serverMessage || res?.error?.message || "Failed to validate provider credentials.",
 		};
 	}
 

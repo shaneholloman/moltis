@@ -10,6 +10,7 @@
 - [Installation](installation.md)
 - [Comparison](comparison.md)
 - [Configuration](configuration.md)
+  - [Upstream Proxy](upstream-proxy.md)
 - [Local Validation](local-validation.md)
 - [End-to-End Testing](e2e-testing.md)
 
@@ -32,6 +33,7 @@
   - [Telegram](telegram.md)
   - [Discord](discord.md)
   - [Slack](slack.md)
+  - [Matrix](matrix.md)
   - [WhatsApp](whatsapp.md)
 - [Browser Automation](browser-automation.md)
 - [CalDAV (Calendars)](caldav.md)

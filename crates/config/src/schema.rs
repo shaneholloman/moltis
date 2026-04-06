@@ -225,6 +225,20 @@ pub struct MoltisConfig {
     pub cron: CronConfig,
     pub caldav: CalDavConfig,
     pub webhooks: WebhooksConfig,
+    /// Upstream HTTP/SOCKS proxy for all outbound requests.
+    ///
+    /// Supports `http://`, `https://`, `socks5://`, and `socks5h://` schemes.
+    /// Proxy authentication via URL: `http://user:pass@host:port`.
+    /// When set, overrides the `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` environment
+    /// variables for all traffic (providers, channels, tools, OAuth).
+    /// Localhost/loopback addresses are automatically excluded (`no_proxy`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::schema::serialize_option_secret",
+        deserialize_with = "crate::schema::deserialize_option_secret"
+    )]
+    pub upstream_proxy: Option<Secret<String>>,
     /// Environment variables injected into the Moltis process at startup.
     /// Useful for API keys in Docker where you can't easily set env vars.
     /// Process env vars take precedence (existing vars are not overwritten).
@@ -1345,14 +1359,16 @@ pub struct McpOAuthOverrideEntry {
 ///
 /// Kept in `moltis-config` (not `moltis-channels`) so the config crate stays
 /// independent of the channels crate while still validating channel names.
-pub const KNOWN_CHANNEL_TYPES: &[&str] = &["telegram", "whatsapp", "msteams", "discord", "slack"];
+pub const KNOWN_CHANNEL_TYPES: &[&str] = &[
+    "telegram", "whatsapp", "msteams", "discord", "slack", "matrix",
+];
 
 /// Channel configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
     /// Which channel types are offered in the web UI (onboarding + channels page).
-    /// Defaults to `["telegram", "discord", "slack"]`. Add `"msteams"` or `"whatsapp"` to opt in.
+    /// Defaults to `["telegram", "discord", "slack", "matrix"]`. Add `"msteams"` or `"whatsapp"` to opt in.
     #[serde(
         default = "default_channels_offered",
         skip_serializing_if = "Vec::is_empty"
@@ -1408,7 +1424,12 @@ impl ChannelsConfig {
 }
 
 fn default_channels_offered() -> Vec<String> {
-    vec!["telegram".into(), "discord".into(), "slack".into()]
+    vec![
+        "telegram".into(),
+        "discord".into(),
+        "slack".into(),
+        "matrix".into(),
+    ]
 }
 
 impl Default for ChannelsConfig {
@@ -2751,12 +2772,13 @@ deny = ["exec"]
     }
 
     #[test]
-    fn channels_config_defaults_to_telegram_discord_slack_offered() {
+    fn channels_config_defaults_to_telegram_discord_slack_matrix_offered() {
         let config = ChannelsConfig::default();
         assert_eq!(config.offered, vec![
             "telegram".to_string(),
             "discord".to_string(),
             "slack".to_string(),
+            "matrix".to_string(),
         ]);
     }
 
@@ -2767,6 +2789,7 @@ deny = ["exec"]
             "telegram".to_string(),
             "discord".to_string(),
             "slack".to_string(),
+            "matrix".to_string(),
         ]);
     }
 

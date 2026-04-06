@@ -211,7 +211,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
             .send_text(
                 &reply_target.account_id,
                 &reply_target.outbound_to(),
-                "Please share your location in this chat.",
+                "Please share your location in this chat, or paste a geo: link / map pin.",
                 None,
             )
             .await
@@ -1420,7 +1420,8 @@ pub async fn prepare_gateway_core(
             Arc::clone(&model_store),
             config.chat.priority_models.clone(),
         )
-        .with_show_legacy_models(config.providers.show_legacy_models),
+        .with_show_legacy_models(config.providers.show_legacy_models)
+        .with_discovery_config(effective_providers.clone(), config_env_overrides.clone()),
     );
     services = services
         .with_model(Arc::clone(&live_model_service) as Arc<dyn crate::services::ModelService>);
@@ -1650,6 +1651,9 @@ pub async fn prepare_gateway_core(
         .manager()
         .set_env_overrides(runtime_env_overrides.clone())
         .await;
+    // Update model service env overrides with UI-stored API keys so that
+    // "Detect All Models" can discover models from those providers too.
+    *live_model_service.env_overrides_handle().write().await = runtime_env_overrides.clone();
     live_mcp
         .set_credential_store(Arc::clone(&credential_store))
         .await;
@@ -2109,6 +2113,21 @@ pub async fn prepare_gateway_core(
         sandbox_config.clone(),
     ));
 
+    // ── Upstream proxy (user-configured) ─────────────────────────────────
+    // Store the URL globally so any crate can build proxied clients, then
+    // initialise the provider shared client before the sandbox proxy.
+    let upstream_proxy = config
+        .upstream_proxy
+        .as_ref()
+        .map(|s| s.expose_secret().as_str());
+    if let Some(url) = upstream_proxy {
+        moltis_common::http_client::set_upstream_proxy(url);
+        // Redact credentials from the log output.
+        let redacted = moltis_common::http_client::redact_proxy_url(url);
+        info!(upstream_proxy = %redacted, "upstream proxy configured for providers and channels");
+    }
+    moltis_providers::init_shared_http_client(upstream_proxy);
+
     // ── Trusted-network proxy + audit ────────────────────────────────────
     #[cfg(feature = "trusted-network")]
     let audit_buffer_for_broadcast: Option<crate::network_audit::NetworkAuditBuffer>;
@@ -2163,7 +2182,9 @@ pub async fn prepare_gateway_core(
                 network_policy = ?sandbox_config.network,
                 "trusted-network proxy not started (policy is not Trusted)"
             );
-            proxy_url_for_tools = None;
+            // No sandbox proxy — fall through to upstream proxy for tools too.
+            moltis_tools::init_shared_http_client(upstream_proxy);
+            proxy_url_for_tools = upstream_proxy.map(String::from);
             proxy_shutdown_tx = None;
         }
 
@@ -2173,6 +2194,13 @@ pub async fn prepare_gateway_core(
             crate::network_audit::LiveNetworkAuditService::new(audit_rx, audit_log_path, 2048);
         audit_buffer_for_broadcast = Some(audit_service.buffer().clone());
         services = services.with_network_audit(Arc::new(audit_service));
+    }
+
+    // When trusted-network feature is disabled, still initialize the tools
+    // shared client with the upstream proxy.
+    #[cfg(not(feature = "trusted-network"))]
+    {
+        moltis_tools::init_shared_http_client(upstream_proxy);
     }
 
     // Spawn background image pre-build. This bakes configured packages into a
@@ -2461,6 +2489,17 @@ pub async fn prepare_gateway_core(
             store::ChannelStore,
         };
 
+        #[cfg(feature = "vault")]
+        let channel_store: Arc<dyn ChannelStore> = {
+            let inner: Arc<dyn ChannelStore> = Arc::new(
+                crate::channel_store::SqliteChannelStore::new(db_pool.clone()),
+            );
+            Arc::new(crate::channel_store::VaultChannelStore::new(
+                inner,
+                vault.clone(),
+            ))
+        };
+        #[cfg(not(feature = "vault"))]
         let channel_store: Arc<dyn ChannelStore> = Arc::new(
             crate::channel_store::SqliteChannelStore::new(db_pool.clone()),
         );
@@ -2499,6 +2538,18 @@ pub async fn prepare_gateway_core(
         registry
             .register(discord_plugin as Arc<tokio::sync::RwLock<dyn ChannelPlugin>>)
             .await;
+
+        #[cfg(feature = "matrix")]
+        {
+            let matrix_plugin = Arc::new(tokio::sync::RwLock::new(
+                moltis_matrix::MatrixPlugin::new()
+                    .with_message_log(Arc::clone(&message_log))
+                    .with_event_sink(Arc::clone(&channel_sink)),
+            ));
+            registry
+                .register(matrix_plugin as Arc<tokio::sync::RwLock<dyn ChannelPlugin>>)
+                .await;
+        }
 
         #[cfg(feature = "whatsapp")]
         {

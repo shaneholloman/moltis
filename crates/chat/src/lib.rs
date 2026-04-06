@@ -1496,6 +1496,11 @@ pub struct LiveModelService {
     detect_gate: Arc<Semaphore>,
     priority_models: Arc<RwLock<Vec<String>>>,
     show_legacy_models: bool,
+    /// Provider config for runtime model rediscovery.
+    providers_config: moltis_config::schema::ProvidersConfig,
+    /// Environment variable overrides for runtime model rediscovery.
+    /// Shared so the gateway can update it after loading UI-stored keys.
+    env_overrides: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl LiveModelService {
@@ -1511,12 +1516,33 @@ impl LiveModelService {
             detect_gate: Arc::new(Semaphore::new(1)),
             priority_models: Arc::new(RwLock::new(priority_models)),
             show_legacy_models: false,
+            providers_config: moltis_config::schema::ProvidersConfig::default(),
+            env_overrides: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub fn with_show_legacy_models(mut self, show: bool) -> Self {
         self.show_legacy_models = show;
         self
+    }
+
+    /// Set the provider config and initial env overrides used for runtime
+    /// model rediscovery when "Detect All Models" is triggered.
+    pub fn with_discovery_config(
+        mut self,
+        providers_config: moltis_config::schema::ProvidersConfig,
+        env_overrides: HashMap<String, String>,
+    ) -> Self {
+        self.providers_config = providers_config;
+        self.env_overrides = Arc::new(RwLock::new(env_overrides));
+        self
+    }
+
+    /// Shared handle to the env overrides. Pass this to code that needs to
+    /// update the overrides after construction (e.g. when runtime UI-stored
+    /// API keys are loaded from the credential store).
+    pub fn env_overrides_handle(&self) -> Arc<RwLock<HashMap<String, String>>> {
+        Arc::clone(&self.env_overrides)
     }
 
     /// Shared handle to the priority models list. Pass this to services
@@ -1760,7 +1786,7 @@ impl ModelService for LiveModelService {
                 .filter(|m| !disabled.is_disabled(&m.id))
                 .filter(|m| disabled.unsupported_info(&m.id).is_none()),
         );
-        info!(model_count = prioritized.len(), "models.list response");
+        debug!(model_count = prioritized.len(), "models.list response");
         let models: Vec<_> = prioritized
             .iter()
             .copied()
@@ -1919,6 +1945,36 @@ impl ModelService for LiveModelService {
         };
 
         let state = self.state.get().cloned();
+
+        // Phase 0: re-discover models from provider APIs so that newly
+        // added models (e.g. a model loaded into llama.cpp after startup)
+        // are found before probing.
+        //
+        // HTTP fetches and Ollama `/api/show` probes run outside the
+        // registry lock; only the fast in-memory registration takes it.
+        {
+            let env_snapshot = self.env_overrides.read().await.clone();
+            let result = moltis_providers::fetch_discoverable_models(
+                &self.providers_config,
+                &env_snapshot,
+                provider_filter.as_deref(),
+            )
+            .await;
+            if !result.is_empty() {
+                let mut reg = self.providers.write().await;
+                let new_count = reg.register_rediscovered_models(
+                    &self.providers_config,
+                    &env_snapshot,
+                    &result,
+                );
+                if new_count > 0 {
+                    tracing::info!(
+                        new_models = new_count,
+                        "rediscovery registered new models before probe"
+                    );
+                }
+            }
+        }
 
         // Phase 1: notify clients to refresh and show the full current model list first.
         if let Some(state) = state.as_ref() {

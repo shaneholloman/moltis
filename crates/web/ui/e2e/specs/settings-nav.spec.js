@@ -827,7 +827,7 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			await channelsPage.prefetchChannels();
 		});
 
 		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
@@ -911,9 +911,10 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			await channelsPage.prefetchChannels();
 		});
 
+		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
 		await expect(page.getByText("Moltis ownership blocked", { exact: true })).toBeVisible();
 		await expect(
 			page.getByText(
@@ -997,7 +998,7 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			await channelsPage.prefetchChannels();
 		});
 
 		await expect(page.getByText("Ownership approval required", { exact: true })).toBeVisible();
@@ -1099,9 +1100,10 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			await channelsPage.prefetchChannels();
 		});
 
+		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
 		await page.getByRole("button", { name: "Senders", exact: true }).click();
 		await expect.poll(() => page.locator(".senders-table tbody tr").count(), { timeout: 10_000 }).toBe(1);
 		await expect(page.getByText("Alice", { exact: true })).toBeVisible();

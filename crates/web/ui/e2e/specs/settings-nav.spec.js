@@ -1176,6 +1176,7 @@ test.describe("Settings navigation", () => {
 			"Memory",
 			"Notifications",
 			"Crons",
+			"Webhooks",
 			"Heartbeat",
 			"Authentication",
 		];

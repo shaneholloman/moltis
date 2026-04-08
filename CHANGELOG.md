@@ -19,6 +19,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260407.01] - 2026-04-07
+### Added
+- [webhooks] Add generic webhook ingress for triggering AI agents
+- [web] Link to Hoppscotch for webhook testing
+- [web] Add CORS to webhook ingress and copy-curl button
+- [website] Add Webhooks to landing page features
+
+
+### Changed
+- [web] Extract webhooks nav icon to external SVG file
+
+
+### Fixed
+- [cli] Report release version in --version output
+- [providers] Propagate cache tokens in Responses API and custom providers
+- [providers] Read cached_tokens from input_tokens_details in non-streaming Responses SSE
+- [agents] Match provider-specific context window error strings
+- [chat] Honor public sessionKey in GraphQL flows
+- [chat] Address PR review — safer mock assertions and precedence test
+- [web] Use globe icon for webhooks settings nav
+- [web] Use ModelSelect and ComboSelect for webhook agent/model fields
+- [web] Use public URL (ngrok/tailscale) for webhook endpoint display
+- Improve webhook test script with verbose output and TLS support
+- Use OnceLock for webhook state fields instead of Arc::get_mut
+- [web] Show Hoppscotch link below webhook list, not only in empty state
+- [web] Match webhooks layout to cron/sandbox and fix nav icon
+- [web] Add missing space before Hoppscotch link
+- [web] Constrain webhooks list width with max-w-form
+- [web] Revert max-w-form, keep webhooks list full width
+- [web] Add webhooks icon to settings nav via components.css
+- [web] Recommend curl and Hoppscotch desktop for webhook testing
+- Use HeaderValue::from_static for CORS headers, remove warning
+- [web] Improve webhook test command button and footer text
+- Don't dedup generic webhooks by body hash, rebuild i18n
+- Address PR review comments
+- [security] Redact auth secrets from webhook API responses
+- Drain unprocessed webhook deliveries on worker startup
+- Include 'processing' deliveries in crash-recovery drain
+- Gitlab_token auth config key mismatch, add regression tests
+- [security] Fail closed on non-parseable Stripe signature timestamp
+- Enable foreign_keys pragma and explicit cascade delete
+- [ci] Restore CHANGELOG.md to main state (changelog guard)
+- Forward agent_id to chat.send_sync in webhook worker
+- Enforce CIDR allowlist, set foreign_keys on pool options
+- [security] Gate forwarded headers on behind_proxy, fix PagerDuty multi-sig
+- Use ConnectInfo for direct IP, disable source_profile on edit
+- [webhooks] Harden webhook execution and secrets
+- Proactive audit — 6 issues found and fixed
+- Wrap cascade deletes in transactions to prevent partial data loss
+- Resolve settings nav CI regression
+
+
+### Security
+- Add webhooks feature documentation
+
 ## [20260406.05] - 2026-04-06
 ### Added
 - [openclaw-import] Convert non-default agents to spawn_agent presets

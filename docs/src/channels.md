@@ -9,11 +9,12 @@ capabilities that control what features are available.
 | Channel | Inbound Mode | Public URL Required | Key Capabilities |
 |---------|-------------|--------------------|--------------------|
 | Telegram | Polling | No | Streaming, voice ingest, reactions, OTP, location |
-| Discord | Gateway (WebSocket) | No | Streaming, interactive messages, threads, reactions |
+| Discord | Gateway (WebSocket) | No | Streaming, interactive messages, threads, voice ingest, reactions |
 | Matrix | Gateway (sync loop) | No | Streaming, voice ingest, interactive polls, threads, reactions, OTP, location, encrypted chats, device verification, ownership bootstrap |
-| Microsoft Teams | Webhook | Yes | Streaming, interactive messages, threads |
+| Microsoft Teams | Webhook | Yes | Streaming, interactive messages, threads, reactions |
 | WhatsApp | Gateway (WebSocket) | No | Streaming, voice ingest, OTP, pairing, location |
 | Slack | Socket Mode | No | Streaming, interactive messages, threads, reactions |
+| Nostr | Gateway (relay subscription) | No | OTP, encrypted DMs (NIP-04) |
 
 ## Inbound Modes
 
@@ -114,8 +115,8 @@ dm_policy = "open"
 ```
 
 For detailed configuration, see the per-channel pages:
-[Telegram](telegram.md), [Discord](discord.md), [Slack](slack.md),
-[Matrix](matrix.md), [WhatsApp](whatsapp.md).
+[Telegram](telegram.md), [Microsoft Teams](teams.md), [Discord](discord.md),
+[Slack](slack.md), [Matrix](matrix.md), [WhatsApp](whatsapp.md).
 
 You can also use the web UI's **Channels** tab for guided setup with each platform. Web-added channels do not get written back into `moltis.toml`.
 

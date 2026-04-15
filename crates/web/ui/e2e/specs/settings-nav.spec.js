@@ -40,10 +40,14 @@ function isRetryableNavigationError(error) {
 }
 
 async function mockChannelsStatus(page, { channels, senders = [], allowRetryOwnership = false, label }) {
+	const firstMarker = channels
+		.map((channel) => String(channel.name || channel.account_id || channel.details || "").trim())
+		.find(Boolean);
 	let lastError = null;
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
 			await expect.poll(() => new URL(page.url()).pathname).toBe("/settings/channels");
+			await expect(page.getByRole("heading", { name: "Channels", exact: true })).toBeVisible();
 			await page.waitForFunction(() => !!document.querySelector('script[type="module"][src*="js/app.js"]'));
 			await page.evaluate(
 				async ({ channels, senders, allowRetryOwnership, label }) => {
@@ -81,11 +85,36 @@ async function mockChannelsStatus(page, { channels, senders = [], allowRetryOwne
 						},
 					});
 					state.setConnected(true);
-					await channelsPage.prefetchChannels();
+					if (typeof state.refreshChannelsPage === "function") {
+						state.refreshChannelsPage();
+					} else {
+						await channelsPage.prefetchChannels();
+					}
+					await new Promise((resolve) => requestAnimationFrame(() => resolve()));
 					await new Promise((resolve) => requestAnimationFrame(() => resolve()));
 				},
 				{ channels, senders, allowRetryOwnership, label },
 			);
+			if (channels.length === 0) {
+				await expect(page.getByText("No channels connected.", { exact: false })).toBeVisible();
+			} else {
+				await expect
+					.poll(
+						async () => {
+							const cardCount = await page
+								.locator(".provider-card")
+								.count()
+								.catch(() => 0);
+							const pageText = await page
+								.locator("#pageContent")
+								.innerText()
+								.catch(() => "");
+							return cardCount >= channels.length && (!firstMarker || pageText.includes(firstMarker));
+						},
+						{ timeout: 10_000 },
+					)
+					.toBe(true);
+			}
 			return;
 		} catch (error) {
 			lastError = error;
@@ -184,6 +213,7 @@ test.describe("Settings navigation", () => {
 		{ id: "mcp", heading: "MCP" },
 		{ id: "hooks", heading: "Hooks" },
 		{ id: "skills", heading: "Skills" },
+		{ id: "projects", heading: "Repositories" },
 		{ id: "sandboxes", heading: "Sandboxes" },
 		{ id: "monitoring", heading: "Monitoring" },
 		{ id: "logs", heading: "Logs" },
@@ -205,6 +235,194 @@ test.describe("Settings navigation", () => {
 			expect(pageErrors).toEqual([]);
 		});
 	}
+
+	test("voice settings saves whisper base URL without requiring an API key", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/voice");
+		await waitForWsConnected(page);
+
+		const whisperRow = page
+			.locator(".provider-card")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: true }) })
+			.first();
+		await expect(whisperRow).toBeVisible();
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app.js script not found");
+			const appUrl = new URL(appScript.src, window.location.origin).href;
+			const marker = "js/app.js";
+			const markerIdx = appUrl.indexOf(marker);
+			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
+			const prefix = appUrl.slice(0, markerIdx);
+			const state = await import(`${prefix}js/state.js`);
+			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
+			window.__voiceSettingsSaveSettingsRequest = null;
+			state.setConnected(true);
+			state.setWs({
+				readyState: wsOpen,
+				send(raw) {
+					const req = JSON.parse(raw || "{}");
+					const resolver = state.pending[req.id];
+					if (!resolver) return;
+					if (req.method === "voice.config.save_settings") {
+						window.__voiceSettingsSaveSettingsRequest = req.params || null;
+						resolver({ ok: true, payload: { ok: true } });
+					} else if (req.method === "voice.providers.all") {
+						resolver({
+							ok: true,
+							payload: {
+								stt: [
+									{
+										id: "whisper",
+										name: "OpenAI Whisper",
+										type: "stt",
+										category: "cloud",
+										description: "Best accuracy, handles accents and background noise",
+										available: true,
+										enabled: false,
+										keySource: "config",
+										settings: { baseUrl: "http://127.0.0.1:8001/v1" },
+										capabilities: { baseUrl: true },
+									},
+								],
+								tts: [],
+							},
+						});
+					} else {
+						resolver({
+							ok: false,
+							error: { message: `unexpected rpc in voice settings test: ${req.method}` },
+						});
+					}
+					delete state.pending[req.id];
+				},
+			});
+		});
+
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		const modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await modal.locator('input[data-field="baseUrl"]').fill("http://127.0.0.1:8001/v1");
+		await modal.getByRole("button", { name: "Save", exact: true }).click();
+
+		await expect.poll(() => page.evaluate(() => window.__voiceSettingsSaveSettingsRequest)).not.toBeNull();
+
+		const sentRequest = await page.evaluate(() => window.__voiceSettingsSaveSettingsRequest);
+		expect(sentRequest).toMatchObject({
+			provider: "whisper",
+			baseUrl: "http://127.0.0.1:8001/v1",
+		});
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("voice settings can clear an existing whisper base URL", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/voice");
+		await waitForWsConnected(page);
+
+		const whisperRow = page
+			.locator(".provider-card")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: true }) })
+			.first();
+		await expect(whisperRow).toBeVisible();
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app.js script not found");
+			const appUrl = new URL(appScript.src, window.location.origin).href;
+			const marker = "js/app.js";
+			const markerIdx = appUrl.indexOf(marker);
+			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
+			const prefix = appUrl.slice(0, markerIdx);
+			const state = await import(`${prefix}js/state.js`);
+			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
+			window.__voiceSettingsCurrentBaseUrl = null;
+			window.__voiceSettingsRequests = [];
+			window.__voiceSettingsClearBaseUrlRequest = null;
+			window.__voiceSettingsProvidersAllRequests = 0;
+			state.setConnected(true);
+			state.setWs({
+				readyState: wsOpen,
+				send(raw) {
+					const req = JSON.parse(raw || "{}");
+					const resolver = state.pending[req.id];
+					if (!resolver) return;
+					if (req.method === "voice.config.save_settings") {
+						window.__voiceSettingsRequests.push(req.params || null);
+						window.__voiceSettingsCurrentBaseUrl =
+							typeof req.params?.baseUrl === "string" ? req.params.baseUrl : window.__voiceSettingsCurrentBaseUrl;
+						if (req.params?.baseUrl === "") {
+							window.__voiceSettingsClearBaseUrlRequest = req.params || null;
+						}
+						resolver({ ok: true, payload: { ok: true } });
+					} else if (req.method === "voice.providers.all") {
+						window.__voiceSettingsProvidersAllRequests += 1;
+						resolver({
+							ok: true,
+							payload: {
+								stt: [
+									{
+										id: "whisper",
+										name: "OpenAI Whisper",
+										type: "stt",
+										category: "cloud",
+										description: "Best accuracy, handles accents and background noise",
+										available: true,
+										enabled: false,
+										keySource: "config",
+										settings: { baseUrl: window.__voiceSettingsCurrentBaseUrl || "" },
+										capabilities: { baseUrl: true },
+									},
+								],
+								tts: [],
+							},
+						});
+					} else {
+						resolver({
+							ok: false,
+							error: { message: `unexpected rpc in voice settings clear-base-url test: ${req.method}` },
+						});
+					}
+					delete state.pending[req.id];
+				},
+			});
+		});
+
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		let modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await modal.locator('input[data-field="baseUrl"]').fill("http://127.0.0.1:8001/v1");
+		await modal.getByRole("button", { name: "Save", exact: true }).click();
+
+		await expect.poll(() => page.evaluate(() => window.__voiceSettingsRequests.length)).toBeGreaterThan(0);
+		await expect.poll(() => page.evaluate(() => window.__voiceSettingsProvidersAllRequests)).toBeGreaterThan(0);
+
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await expect(modal.locator('input[data-field="baseUrl"]')).toHaveValue("http://127.0.0.1:8001/v1");
+		await modal.locator('input[data-field="baseUrl"]').fill("");
+		await modal.getByRole("button", { name: "Save", exact: true }).click();
+
+		await expect.poll(() => page.evaluate(() => window.__voiceSettingsClearBaseUrlRequest)).not.toBeNull();
+
+		const sentRequest = await page.evaluate(() => window.__voiceSettingsClearBaseUrlRequest);
+		expect(sentRequest).toMatchObject({
+			provider: "whisper",
+			baseUrl: "",
+		});
+		expect(pageErrors).toEqual([]);
+	});
 
 	test("remote access page shows tailscale and ngrok cards", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
@@ -477,6 +695,9 @@ test.describe("Settings navigation", () => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/identity");
 
+		// Wait for the identity form to be fully initialised (no pending save).
+		await expect(page.locator('button[type="submit"]')).not.toHaveText(/Saving/, { timeout: 5_000 });
+
 		const nextValues = await page.evaluate(() => {
 			var id = window.__MOLTIS__?.identity || {};
 			var nextBotName = id.name === "AutoBotNameA" ? "AutoBotNameB" : "AutoBotNameA";
@@ -486,18 +707,26 @@ test.describe("Settings navigation", () => {
 
 		const botNameInput = page.getByPlaceholder("e.g. Rex");
 		await botNameInput.fill(nextValues.nextBotName);
+		// Ensure fill() has propagated before triggering blur
+		await expect(botNameInput).toHaveValue(nextValues.nextBotName);
 		await botNameInput.blur();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+		// The autosave RPC can be slow under CI load; wait for the
+		// data update (authoritative) rather than the transient "Saved"
+		// flash which only lasts 2 s and can be missed.
 		await expect
-			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.name || "").trim()))
+			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.name || "").trim()), { timeout: 15_000 })
 			.toBe(nextValues.nextBotName);
+
+		// Wait for the first save to fully settle (nameSaving → false)
+		// before triggering the second blur-save.
+		await expect(page.locator('button[type="submit"]')).not.toHaveText(/Saving/, { timeout: 5_000 });
 
 		const userNameInput = page.getByPlaceholder("e.g. Alice");
 		await userNameInput.fill(nextValues.nextUserName);
+		await expect(userNameInput).toHaveValue(nextValues.nextUserName);
 		await userNameInput.blur();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
 		await expect
-			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.user_name || "").trim()))
+			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.user_name || "").trim()), { timeout: 15_000 })
 			.toBe(nextValues.nextUserName);
 
 		expect(pageErrors).toEqual([]);
@@ -1065,6 +1294,7 @@ test.describe("Settings navigation", () => {
 			});
 			state.setConnected(true);
 			await channelsPage.prefetchChannels();
+			await new Promise((resolve) => requestAnimationFrame(() => resolve()));
 		});
 
 		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
@@ -1136,6 +1366,7 @@ test.describe("Settings navigation", () => {
 			"Identity",
 			"Agents",
 			"Nodes",
+			"Projects",
 			"Environment",
 			"Memory",
 			"Notifications",

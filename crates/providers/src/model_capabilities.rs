@@ -1,6 +1,19 @@
 //! Model capability heuristics: context window, tool support, vision, reasoning.
 
-use crate::model_id::capability_model_id;
+use {crate::model_id::capability_model_id, moltis_config::schema::ModelOverride};
+
+/// Extract a `HashMap<String, u32>` of model ID → context window from
+/// a `HashMap<String, ModelOverride>`, filtering out entries without a
+/// `context_window` value.
+#[must_use]
+pub fn extract_cw_overrides(
+    overrides: &std::collections::HashMap<String, ModelOverride>,
+) -> std::collections::HashMap<String, u32> {
+    overrides
+        .iter()
+        .filter_map(|(k, v)| v.context_window.map(|cw| (k.clone(), cw)))
+        .collect()
+}
 
 /// Return the known context window size (in tokens) for a model ID.
 /// Falls back to 200,000 for unknown models.
@@ -251,6 +264,10 @@ pub fn supports_reasoning_for_model(model_id: &str) -> bool {
     }
     // DeepSeek R1 / reasoning models
     if id.contains("deepseek-r1") || id.contains("deepseek-reasoner") {
+        return true;
+    }
+    // xAI Grok 3+ reasoning models (Grok 3, Grok 3 Mini, Grok 4 series)
+    if id.starts_with("grok-3") || id.starts_with("grok-4") {
         return true;
     }
     false
@@ -542,6 +559,23 @@ mod tests {
         assert!(supports_reasoning_for_model("gpt-5"));
         assert!(supports_reasoning_for_model("gpt-5-mini"));
         assert!(supports_reasoning_for_model("gpt-5.2"));
+        // xAI Grok reasoning models
+        assert!(supports_reasoning_for_model("grok-3"));
+        assert!(supports_reasoning_for_model("grok-3-latest"));
+        assert!(supports_reasoning_for_model("grok-3-mini"));
+        assert!(supports_reasoning_for_model("grok-3-mini-latest"));
+        assert!(supports_reasoning_for_model("grok-4-0420"));
+        assert!(supports_reasoning_for_model("grok-4"));
+        // OpenRouter-style namespaced Grok model IDs
+        assert!(supports_reasoning_for_model(
+            "custom-openrouter::xai/grok-4-0420"
+        ));
+        assert!(supports_reasoning_for_model(
+            "custom-openrouter::xai/grok-3-mini"
+        ));
+        // Grok 2 does NOT support reasoning
+        assert!(!supports_reasoning_for_model("grok-2"));
+        assert!(!supports_reasoning_for_model("grok-2-latest"));
 
         // Models that don't support reasoning
         assert!(!supports_reasoning_for_model("gemini-2.0-flash"));
@@ -772,5 +806,75 @@ mod tests {
             context_window_for_model_with_config("claude-sonnet-4-20250514", &global, &empty_map()),
             200_000,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_cw_overrides {
+    use {super::*, std::collections::HashMap};
+
+    /// Verify provider-scoped override wins over global and heuristic.
+    #[test]
+    fn provider_override_wins() {
+        let global: HashMap<String, u32> = vec![("claude-sonnet-4-20250514".into(), 300_000)]
+            .into_iter()
+            .collect();
+        let provider: HashMap<String, u32> = vec![("claude-sonnet-4-20250514".into(), 999_000)]
+            .into_iter()
+            .collect();
+
+        let cw =
+            context_window_for_model_with_config("claude-sonnet-4-20250514", &global, &provider);
+        assert_eq!(cw, 999_000);
+    }
+
+    /// Verify global override wins over heuristic when no provider override.
+    #[test]
+    fn global_override_wins_over_heuristic() {
+        let global: HashMap<String, u32> = vec![("claude-sonnet-4-20250514".into(), 500_000)]
+            .into_iter()
+            .collect();
+        let provider: HashMap<String, u32> = HashMap::new();
+
+        let cw =
+            context_window_for_model_with_config("claude-sonnet-4-20250514", &global, &provider);
+        assert_eq!(cw, 500_000);
+    }
+
+    /// Verify empty maps fall through to heuristic.
+    #[test]
+    fn empty_maps_use_heuristic() {
+        let cw = context_window_for_model_with_config(
+            "claude-sonnet-4-20250514",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        // Heuristic for claude-* is 200_000
+        assert_eq!(cw, 200_000);
+    }
+
+    /// Verify extract_cw_overrides filters out None entries.
+    #[test]
+    fn extract_cw_overrides_filters_none() {
+        use moltis_config::schema::ModelOverride;
+
+        let mut overrides = HashMap::new();
+        overrides.insert("claude-opus-4-20250514".into(), ModelOverride {
+            context_window: Some(1_000_000),
+        });
+        overrides.insert("gpt-4o".into(), ModelOverride {
+            context_window: None,
+        });
+
+        let extracted = extract_cw_overrides(&overrides);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted.get("claude-opus-4-20250514"), Some(&1_000_000));
+    }
+
+    /// Verify extract_cw_overrides returns empty map for empty input.
+    #[test]
+    fn extract_cw_overrides_empty() {
+        let extracted = extract_cw_overrides(&HashMap::new());
+        assert!(extracted.is_empty());
     }
 }

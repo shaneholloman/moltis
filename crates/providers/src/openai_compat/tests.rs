@@ -667,6 +667,262 @@ fn sanitize_does_not_infer_type_for_mixed_enums() {
     );
 }
 
+/// Issue #747: MCP tools (e.g. Home Assistant) may have `required` entries
+/// referencing properties not defined in `properties`. Canonicalization adds
+/// implicit `{}` schemas for these, but the prune transform removes them from
+/// `required` since Gemini rejects properties without usable type info.
+#[test]
+fn sanitize_prunes_orphaned_required_entries() {
+    let mut schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "entity_id": { "type": "string" },
+            "brightness": { "type": "integer" }
+        },
+        "required": ["entity_id", "brightness", "color_temp", "transition"]
+    });
+
+    sanitize_schema_for_openai_compat(&mut schema);
+
+    let required = schema["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("required should be an array"));
+    let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        names.contains(&"entity_id"),
+        "defined property must stay in required"
+    );
+    assert!(
+        names.contains(&"brightness"),
+        "defined property must stay in required"
+    );
+    assert!(
+        !names.contains(&"color_temp"),
+        "orphaned property must be pruned from required"
+    );
+    assert!(
+        !names.contains(&"transition"),
+        "orphaned property must be pruned from required"
+    );
+    assert_eq!(names.len(), 2);
+}
+
+/// Issue #747: orphaned `required` entries in nested object schemas must
+/// also be pruned (e.g. MCP tools with deeply nested parameters).
+#[test]
+fn sanitize_prunes_orphaned_required_in_nested_objects() {
+    let mut schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "target": {
+                "type": "object",
+                "properties": {
+                    "entity_id": { "type": "string" }
+                },
+                "required": ["entity_id", "area_id", "device_id"]
+            }
+        },
+        "required": ["target"]
+    });
+
+    sanitize_schema_for_openai_compat(&mut schema);
+
+    let nested_required = schema["properties"]["target"]["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("nested required should be an array"));
+    let names: Vec<&str> = nested_required.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["entity_id"],
+        "only entity_id should remain — area_id and device_id had no real schema"
+    );
+}
+
+/// Issue #747: end-to-end through `to_openai_tools` with strict=false
+/// (OpenRouter → Gemini path). Orphaned required entries must be pruned
+/// so Gemini doesn't reject with "property is not defined".
+#[test]
+fn to_openai_tools_non_strict_prunes_orphaned_required() {
+    let tools = vec![serde_json::json!({
+        "name": "mcp__ha__light_turn_on",
+        "description": "Turn on a light",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "entity_id": { "type": "string" },
+                "brightness": { "type": "integer" }
+            },
+            "required": ["entity_id", "color_temp", "transition"]
+        }
+    })];
+
+    let converted = to_openai_tools(&tools, false);
+    let params = &converted[0]["function"]["parameters"];
+
+    let required = params["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("required should be an array"));
+    let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["entity_id"],
+        "only defined properties should remain in required"
+    );
+}
+
+/// Issue #747: schemas where `required` references properties only defined
+/// through `dependentSchemas` — after canonicalization and keyword stripping,
+/// those properties lack usable schemas and are pruned from `required`.
+/// The `dependentSchemas` keyword itself must also be stripped.
+#[test]
+fn sanitize_prunes_required_from_stripped_dependent_schemas() {
+    let mut schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "mode": { "type": "string" }
+        },
+        "dependentSchemas": {
+            "mode": {
+                "properties": {
+                    "extra_param": { "type": "string" }
+                }
+            }
+        },
+        "required": ["mode", "extra_param"]
+    });
+
+    sanitize_schema_for_openai_compat(&mut schema);
+
+    let required = schema["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("required should be an array"));
+    let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+    assert!(names.contains(&"mode"), "mode should stay in required");
+    assert!(
+        !names.contains(&"extra_param"),
+        "extra_param should be pruned — only defined via dependentSchemas"
+    );
+    // `dependentSchemas` itself must be stripped
+    assert!(
+        schema.get("dependentSchemas").is_none(),
+        "dependentSchemas should be stripped"
+    );
+}
+
+/// Issue #743: MCP tools declaring `$schema: "http://json-schema.org/draft-07/schema#"`
+/// (e.g. Attio) bypass canonicalization entirely because `SchemaDocument::from_json()`
+/// only accepts Draft 2020-12. Without canonicalization, stripping `not` leaves
+/// empty `{}` schemas inside `anyOf` which OpenAI rejects ("schema must have a
+/// 'type' key"). The sanitizer must strip `$schema` before canonicalization so
+/// that draft-07 schemas get the same AST resolution as draft 2020-12.
+#[test]
+fn sanitize_draft07_schema_strips_unsupported_keywords() {
+    // Reproduces the Attio MCP schema pattern from issue #743:
+    // nested anyOf with `not` and no `type` key, declared as draft-07.
+    let mut schema = serde_json::json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "query": {
+                "anyOf": [
+                    {
+                        "anyOf": [
+                            {
+                                "not": {
+                                    "const": ""
+                                }
+                            },
+                            {
+                                "type": "string"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "null"
+                    }
+                ]
+            }
+        }
+    });
+
+    sanitize_schema_for_openai_compat(&mut schema);
+    let encoded = schema.to_string();
+
+    // `$schema` must be stripped.
+    assert!(
+        !encoded.contains("$schema"),
+        "$schema should be removed, got: {encoded}"
+    );
+    // `not` must be stripped.
+    assert!(
+        !encoded.contains("\"not\""),
+        "\"not\" should be removed from draft-07 schema, got: {encoded}"
+    );
+
+    // Critical assertion: no empty `{}` schemas left inside anyOf variants.
+    // Without canonicalization, stripping `not` leaves `{}` which OpenAI
+    // rejects with "schema must have a 'type' key".
+    assert!(
+        !encoded.contains("{}"),
+        "empty schemas should not remain after sanitization, got: {encoded}"
+    );
+    // The root `type: object` must survive.
+    assert_eq!(schema["type"], "object");
+}
+
+/// Issue #743: end-to-end through `to_responses_api_tools` with a draft-07
+/// schema containing the exact Attio pattern that OpenAI rejects.
+#[test]
+fn responses_tools_draft07_attio_schema_normalized() {
+    let tools = vec![serde_json::json!({
+        "name": "mcp__attio__list-attribute-definitions",
+        "description": "Attio test tool (draft-07)",
+        "parameters": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "query": {
+                    "anyOf": [
+                        {
+                            "anyOf": [
+                                {
+                                    "not": {
+                                        "const": ""
+                                    }
+                                },
+                                {
+                                    "type": "string"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                }
+            }
+        }
+    })];
+
+    let converted = to_responses_api_tools(&tools);
+    let params = &converted[0]["parameters"];
+    let encoded = params.to_string();
+
+    assert!(
+        !encoded.contains("$schema"),
+        "$schema must be removed: {encoded}"
+    );
+    assert!(
+        !encoded.contains("\"not\""),
+        "\"not\" must be removed: {encoded}"
+    );
+    assert!(
+        !encoded.contains("{}"),
+        "empty schemas should not remain after sanitization: {encoded}"
+    );
+    assert_eq!(params["type"], "object");
+}
+
 /// Issue #712: enum-only schemas (no `type` key) must also get null
 /// appended. Canonicalization can strip the redundant `"type": "string"`
 /// leaving just `{"enum": [...]}` — the final fallback in make_nullable

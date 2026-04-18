@@ -19,6 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260417.02] - 2026-04-17
+### Added
+- [nostr] Add NIP-59 Gift Wrap support for private DMs (#763)
+- [matrix] Add OIDC authentication via Matrix Authentication Service (#730)
+
+
+### Removed
+- [tests] Remove hardcoded secret fixtures (#768)
+
+
+### Fixed
+- [providers] Strip $schema recursively and downgrade fallback log level (#762)
+- [matrix] Retry sync loop on transient connection failures (#761)
+- [e2e] Stabilize archived-sessions and nostr channel tests
+- [sandbox] Skip sysfs tmpfs overlays on Podman (#765)
+- [slack] Register /commands HTTP endpoint for slash commands (#767)
+- [matrix] Restore main CI after OIDC changes
+
 ## [20260417.01] - 2026-04-17
 ### Added
 - [web] Add reasoning effort toggle to chat toolbar (#750)

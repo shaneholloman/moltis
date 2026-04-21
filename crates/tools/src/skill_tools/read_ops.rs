@@ -112,7 +112,8 @@ impl AgentTool for ReadSkillTool {
             .get("name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::message("missing 'name'"))?;
-        // Treat empty string the same as absent — models often send "" instead of omitting.
+        // Treat empty string the same as absent — models often send ""
+        // instead of omitting the field.
         let file_path = params
             .get("file_path")
             .and_then(|v| v.as_str())

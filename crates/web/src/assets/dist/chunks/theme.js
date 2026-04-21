@@ -5730,9 +5730,12 @@ mdRenderer.code = ({ text, lang }) => {
   return `<pre class="code-block">${badge}<code${langAttr}>${esc(text)}</code></pre>
 `;
 };
-mdRenderer.table = (token) => {
-  const header = token.header.map((cell) => `<th>${esc(cell.text)}</th>`).join("");
-  const body = token.rows.map((row) => `<tr>${row.map((cell) => `<td>${esc(cell.text)}</td>`).join("")}</tr>`).join("");
+mdRenderer.table = function(token) {
+  const renderCell = (cell) => this.parser.parseInline(cell.tokens);
+  const header = token.header.map((cell) => `<th>${renderCell(cell)}</th>`).join("");
+  const body = token.rows.map(
+    (row) => `<tr>${row.map((cell) => `<td>${renderCell(cell)}</td>`).join("")}</tr>`
+  ).join("");
   return `<div class="msg-table-wrap"><table class="msg-table"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>
 `;
 };

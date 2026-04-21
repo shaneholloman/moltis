@@ -3659,6 +3659,71 @@ function SessionList() {
   }
   return /* @__PURE__ */ u("div", { ref: spinnersRef, children: roots.map((s) => renderTree(s, 0)) });
 }
+const REPO = "moltis-org/moltis";
+const CACHE_KEY = "moltis-github-stats";
+const CACHE_TTL_MS = 60 * 60 * 1e3;
+function readCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const cached2 = JSON.parse(raw);
+    if (Date.now() - cached2.fetchedAt < CACHE_TTL_MS) return cached2;
+  } catch {
+  }
+  return null;
+}
+function writeCache(stats) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(stats));
+  } catch {
+  }
+}
+function setBadge(id, count) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = count !== null && count > 0 ? String(count) : "";
+}
+function applyStats(stats) {
+  setBadge("githubIssuesCount", stats.issues);
+  setBadge("githubDiscussionsCount", stats.discussions);
+}
+async function fetchIssuesCount() {
+  try {
+    const resp = await fetch(`https://api.github.com/search/issues?q=repo:${REPO}+type:issue+state:open&per_page=1`);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.total_count ?? null;
+  } catch {
+    return null;
+  }
+}
+async function fetchDiscussionsCount() {
+  try {
+    const resp = await fetch(`https://api.github.com/repos/${REPO}/discussions?per_page=1`);
+    if (!resp.ok) return null;
+    const link = resp.headers.get("Link");
+    if (link) {
+      const match = /[&?]page=(\d+)>;\s*rel="last"/.exec(link);
+      if (match) return Number.parseInt(match[1], 10);
+    }
+    const items = await resp.json();
+    return items.length;
+  } catch {
+    return null;
+  }
+}
+async function fetchAndCache() {
+  const [issues, discussions] = await Promise.all([fetchIssuesCount(), fetchDiscussionsCount()]);
+  const stats = { issues, discussions, fetchedAt: Date.now() };
+  writeCache(stats);
+  applyStats(stats);
+}
+const cached = readCache();
+if (cached) {
+  applyStats(cached);
+} else {
+  fetchAndCache();
+}
 let navPanel = null;
 let navOverlay = null;
 let sessionsPanel = null;
@@ -15029,7 +15094,24 @@ function EnabledSkillsTable() {
   const activeDetail = useSignal(null);
   const detailLoading = useSignal(false);
   const pending = useSignal(null);
+  const activeCategory = useSignal(null);
+  const searchQuery = useSignal("");
   if (!(s == null ? void 0 : s.length)) return null;
+  const categories = g(() => {
+    const cats = /* @__PURE__ */ new Set();
+    for (const sk of enabledSkills.value) {
+      cats.add(sk.category || "other");
+    }
+    return Array.from(cats).sort();
+  });
+  const filtered = s.filter((sk) => {
+    if (activeCategory.value && (sk.category || "other") !== activeCategory.value) return false;
+    if (searchQuery.value) {
+      const q2 = searchQuery.value.toLowerCase();
+      return sk.name.toLowerCase().includes(q2) || (sk.description || "").toLowerCase().includes(q2);
+    }
+    return true;
+  });
   function isDisc(sk) {
     return sk.source === "personal" || sk.source === "project";
   }
@@ -15071,7 +15153,65 @@ function EnabledSkillsTable() {
     });
   }
   return /* @__PURE__ */ u("div", { className: "skills-section", children: [
-    /* @__PURE__ */ u("h3", { className: "skills-section-title", children: "Enabled Skills" }),
+    /* @__PURE__ */ u("div", { className: "flex items-center gap-3 mb-2", children: [
+      /* @__PURE__ */ u("h3", { className: "skills-section-title", style: { margin: 0 }, children: [
+        "Enabled Skills",
+        /* @__PURE__ */ u("span", { className: "ml-2 text-xs font-normal text-[var(--muted)]", children: [
+          "(",
+          filtered.length,
+          filtered.length !== s.length ? ` of ${s.length}` : "",
+          ")"
+        ] })
+      ] }),
+      /* @__PURE__ */ u(
+        "input",
+        {
+          type: "text",
+          placeholder: "Search skills...",
+          value: searchQuery.value,
+          onInput: (e) => {
+            searchQuery.value = e.target.value;
+          },
+          className: "skills-install-input",
+          style: { maxWidth: "240px", fontSize: ".78rem", padding: "4px 8px" }
+        }
+      )
+    ] }),
+    categories.value.length > 1 && /* @__PURE__ */ u("div", { className: "flex flex-wrap gap-1.5 mb-3", children: [
+      /* @__PURE__ */ u(
+        "button",
+        {
+          className: `skills-category-pill ${activeCategory.value === null ? "active" : ""}`,
+          onClick: () => {
+            activeCategory.value = null;
+          },
+          children: [
+            "All (",
+            s.length,
+            ")"
+          ]
+        }
+      ),
+      categories.value.map((cat) => {
+        const count = s.filter((sk) => (sk.category || "other") === cat).length;
+        return /* @__PURE__ */ u(
+          "button",
+          {
+            className: `skills-category-pill ${activeCategory.value === cat ? "active" : ""}`,
+            onClick: () => {
+              activeCategory.value = activeCategory.value === cat ? null : cat;
+            },
+            children: [
+              cat,
+              " (",
+              count,
+              ")"
+            ]
+          },
+          cat
+        );
+      })
+    ] }),
     /* @__PURE__ */ u("div", { className: "skills-table-wrap", children: /* @__PURE__ */ u("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: ".82rem" }, children: [
       /* @__PURE__ */ u("thead", { children: /* @__PURE__ */ u("tr", { style: { borderBottom: "1px solid var(--border)", background: "var(--surface)" }, children: [
         /* @__PURE__ */ u(
@@ -15118,61 +15258,73 @@ function EnabledSkillsTable() {
         ),
         /* @__PURE__ */ u("th", {})
       ] }) }),
-      /* @__PURE__ */ u("tbody", { children: s.map((sk) => {
-        var _a2;
-        return /* @__PURE__ */ u(
-          "tr",
-          {
-            className: "cursor-pointer",
-            style: { borderBottom: "1px solid var(--border)" },
-            onClick: () => loadDetail(sk),
-            children: [
-              /* @__PURE__ */ u(
-                "td",
-                {
-                  style: {
-                    padding: "8px 12px",
-                    fontWeight: 500,
-                    color: "var(--accent)",
-                    fontFamily: "var(--font-mono)"
-                  },
-                  children: sk.name
-                }
-              ),
-              /* @__PURE__ */ u("td", { style: { padding: "8px 12px" }, children: sk.description || "—" }),
-              /* @__PURE__ */ u("td", { style: { padding: "8px 12px" }, children: /* @__PURE__ */ u("span", { className: ((_a2 = sk.source) == null ? void 0 : _a2.includes("/")) ? "tier-badge" : "recommended-badge", children: sk.source }) }),
-              /* @__PURE__ */ u("td", { style: { padding: "8px 12px", textAlign: "right" }, children: /* @__PURE__ */ u(
-                "button",
-                {
-                  disabled: isDisc(sk) && sk.protected === true || pending.value === sk.name,
-                  className: isDisc(sk) ? "provider-btn provider-btn-sm provider-btn-danger" : "provider-btn provider-btn-sm provider-btn-secondary",
-                  onClick: (e) => {
-                    e.stopPropagation();
-                    onDisable(sk);
-                  },
-                  children: pending.value === sk.name ? "..." : isDisc(sk) ? "Delete" : "Disable"
-                }
-              ) })
-            ]
-          },
-          sk.name
-        );
+      /* @__PURE__ */ u("tbody", { children: filtered.map((sk) => {
+        var _a2, _b2;
+        const isActive = ((_a2 = activeDetail.value) == null ? void 0 : _a2.name) === sk.name;
+        return /* @__PURE__ */ u(S, { children: [
+          /* @__PURE__ */ u(
+            "tr",
+            {
+              className: "cursor-pointer",
+              style: {
+                borderBottom: isActive ? "none" : "1px solid var(--border)",
+                background: isActive ? "var(--bg-hover)" : void 0
+              },
+              onClick: () => loadDetail(sk),
+              children: [
+                /* @__PURE__ */ u(
+                  "td",
+                  {
+                    style: {
+                      padding: "8px 12px",
+                      fontWeight: 500,
+                      color: "var(--accent)",
+                      fontFamily: "var(--font-mono)"
+                    },
+                    children: [
+                      sk.name,
+                      sk.category && !activeCategory.value && /* @__PURE__ */ u("span", { className: "skills-category-badge", children: sk.category })
+                    ]
+                  }
+                ),
+                /* @__PURE__ */ u("td", { style: { padding: "8px 12px" }, children: sk.description || "—" }),
+                /* @__PURE__ */ u("td", { style: { padding: "8px 12px" }, children: /* @__PURE__ */ u("span", { className: ((_b2 = sk.source) == null ? void 0 : _b2.includes("/")) ? "tier-badge" : "recommended-badge", children: sk.source }) }),
+                /* @__PURE__ */ u("td", { style: { padding: "8px 12px", textAlign: "right" }, children: sk.source !== "bundled" && /* @__PURE__ */ u(
+                  "button",
+                  {
+                    disabled: isDisc(sk) && sk.protected === true || pending.value === sk.name,
+                    className: isDisc(sk) ? "provider-btn provider-btn-sm provider-btn-danger" : "provider-btn provider-btn-sm provider-btn-secondary",
+                    onClick: (e) => {
+                      e.stopPropagation();
+                      onDisable(sk);
+                    },
+                    children: pending.value === sk.name ? "..." : isDisc(sk) ? "Delete" : "Disable"
+                  }
+                ) })
+              ]
+            },
+            sk.name
+          ),
+          isActive && activeDetail.value && /* @__PURE__ */ u("tr", { children: /* @__PURE__ */ u("td", { colSpan: 4, style: { padding: 0, borderBottom: "1px solid var(--border)" }, children: /* @__PURE__ */ u(
+            SkillDetailPanel,
+            {
+              detail: activeDetail.value,
+              repoSource: activeDetail.value.source,
+              onClose: () => {
+                activeDetail.value = null;
+              },
+              onReload: () => {
+                var _a3, _b3;
+                return loadDetail({
+                  name: (_a3 = activeDetail.value) == null ? void 0 : _a3.name,
+                  source: (_b3 = activeDetail.value) == null ? void 0 : _b3.source
+                });
+              }
+            }
+          ) }) }, `${sk.name}-detail`)
+        ] });
       }) })
-    ] }) }),
-    activeDetail.value && /* @__PURE__ */ u(
-      SkillDetailPanel,
-      {
-        detail: activeDetail.value,
-        repoSource: activeDetail.value.source,
-        onClose: () => {
-          activeDetail.value = null;
-        },
-        onReload: () => {
-          var _a2, _b2;
-          return loadDetail({ name: (_a2 = activeDetail.value) == null ? void 0 : _a2.name, source: (_b2 = activeDetail.value) == null ? void 0 : _b2.source });
-        }
-      }
-    )
+    ] }) })
   ] });
 }
 function SkillsPageComponent() {
@@ -27001,6 +27153,11 @@ function MemorySection() {
   const [searchMergeStrategy, setSearchMergeStrategy] = d("rrf");
   const [sessionExport, setSessionExport] = d("on-new-or-reset");
   const [promptMemoryMode, setPromptMemoryMode] = d("live-reload");
+  const [enablePrefetch, setEnablePrefetch] = d(true);
+  const [prefetchLimit, setPrefetchLimit] = d(3);
+  const [autoExtractInterval, setAutoExtractInterval] = d(5);
+  const [enableSessionSummary, setEnableSessionSummary] = d(true);
+  const [enableSelfImprovement, setEnableSelfImprovement] = d(true);
   y$1(() => {
     Promise.all([sendRpc("memory.status", {}), sendRpc("memory.config.get", {}), sendRpc("memory.qmd.status", {})]).then(([statusRes, configRes, qmdRes]) => {
       if (statusRes == null ? void 0 : statusRes.ok) {
@@ -27019,6 +27176,11 @@ function MemorySection() {
         setSearchMergeStrategy(cfg.search_merge_strategy || "rrf");
         setSessionExport(cfg.session_export || "on-new-or-reset");
         setPromptMemoryMode(cfg.prompt_memory_mode || "live-reload");
+        setEnablePrefetch(cfg.enable_prefetch ?? true);
+        setPrefetchLimit(cfg.prefetch_limit ?? 3);
+        setAutoExtractInterval(cfg.auto_extract_interval ?? 5);
+        setEnableSessionSummary(cfg.enable_session_summary ?? true);
+        setEnableSelfImprovement(cfg.enable_self_improvement ?? true);
       }
       if (qmdRes == null ? void 0 : qmdRes.ok) {
         setQmdStatus(qmdRes.payload);
@@ -27044,7 +27206,12 @@ function MemorySection() {
       llm_reranking: llmReranking,
       search_merge_strategy: searchMergeStrategy,
       session_export: sessionExport,
-      prompt_memory_mode: promptMemoryMode
+      prompt_memory_mode: promptMemoryMode,
+      enable_prefetch: enablePrefetch,
+      prefetch_limit: prefetchLimit,
+      auto_extract_interval: autoExtractInterval,
+      enable_session_summary: enableSessionSummary,
+      enable_self_improvement: enableSelfImprovement
     }).then((res) => {
       var _a2;
       save.setSaving(false);
@@ -27493,6 +27660,119 @@ function MemorySection() {
           /* @__PURE__ */ u("p", { className: "text-xs text-[var(--muted)]", style: { margin: "2px 0 0" }, children: "Use the LLM to rerank search results for better relevance (slower but more accurate)." })
         ] })
       ] }) }),
+      /* @__PURE__ */ u("div", { children: [
+        /* @__PURE__ */ u(SubHeading, { title: "Agent Self-Improvement" }),
+        /* @__PURE__ */ u("p", { className: "text-xs text-[var(--muted)]", style: { margin: "0 0 8px" }, children: "Controls how the agent learns autonomously across sessions." }),
+        /* @__PURE__ */ u("div", { style: { display: "flex", flexDirection: "column", gap: "10px" }, children: [
+          /* @__PURE__ */ u("label", { className: "text-xs flex items-center gap-2 cursor-pointer", children: [
+            /* @__PURE__ */ u(
+              "input",
+              {
+                type: "checkbox",
+                checked: enableSelfImprovement,
+                onChange: (e) => {
+                  setEnableSelfImprovement(targetChecked(e));
+                  rerender$1();
+                }
+              }
+            ),
+            /* @__PURE__ */ u("div", { children: [
+              /* @__PURE__ */ u("span", { className: "text-[var(--text)]", children: "Skill self-improvement prompting" }),
+              /* @__PURE__ */ u("span", { className: "text-[var(--muted)] block text-[.7rem]", children: "Encourage the agent to create reusable skills after complex tasks" })
+            ] })
+          ] }),
+          /* @__PURE__ */ u("label", { className: "text-xs flex items-center gap-2 cursor-pointer", children: [
+            /* @__PURE__ */ u(
+              "input",
+              {
+                type: "checkbox",
+                checked: enablePrefetch,
+                onChange: (e) => {
+                  setEnablePrefetch(targetChecked(e));
+                  rerender$1();
+                }
+              }
+            ),
+            /* @__PURE__ */ u("div", { children: [
+              /* @__PURE__ */ u("span", { className: "text-[var(--text)]", children: "Memory recall (prefetch)" }),
+              /* @__PURE__ */ u("span", { className: "text-[var(--muted)] block text-[.7rem]", children: "Automatically recall relevant memories before each turn" })
+            ] })
+          ] }),
+          enablePrefetch ? /* @__PURE__ */ u("div", { style: { marginLeft: "24px" }, children: /* @__PURE__ */ u("label", { className: "text-xs text-[var(--muted)]", children: [
+            "Max results per turn:",
+            " ",
+            /* @__PURE__ */ u(
+              "input",
+              {
+                type: "number",
+                min: 1,
+                max: 10,
+                className: "provider-key-input",
+                style: { width: "60px", marginLeft: "4px" },
+                value: prefetchLimit,
+                onChange: (e) => {
+                  setPrefetchLimit(Number.parseInt(targetValue(e), 10) || 3);
+                  rerender$1();
+                }
+              }
+            )
+          ] }) }) : null,
+          /* @__PURE__ */ u("label", { className: "text-xs flex items-center gap-2 cursor-pointer", children: [
+            /* @__PURE__ */ u(
+              "input",
+              {
+                type: "checkbox",
+                checked: autoExtractInterval > 0,
+                onChange: (e) => {
+                  setAutoExtractInterval(targetChecked(e) ? 5 : 0);
+                  rerender$1();
+                }
+              }
+            ),
+            /* @__PURE__ */ u("div", { children: [
+              /* @__PURE__ */ u("span", { className: "text-[var(--text)]", children: "Periodic memory extraction" }),
+              /* @__PURE__ */ u("span", { className: "text-[var(--muted)] block text-[.7rem]", children: "Automatically save important context every N turns" })
+            ] })
+          ] }),
+          autoExtractInterval > 0 ? /* @__PURE__ */ u("div", { style: { marginLeft: "24px" }, children: /* @__PURE__ */ u("label", { className: "text-xs text-[var(--muted)]", children: [
+            "Every",
+            " ",
+            /* @__PURE__ */ u(
+              "input",
+              {
+                type: "number",
+                min: 1,
+                max: 50,
+                className: "provider-key-input",
+                style: { width: "60px", margin: "0 4px" },
+                value: autoExtractInterval,
+                onChange: (e) => {
+                  setAutoExtractInterval(Number.parseInt(targetValue(e), 10) || 5);
+                  rerender$1();
+                }
+              }
+            ),
+            "turns"
+          ] }) }) : null,
+          /* @__PURE__ */ u("label", { className: "text-xs flex items-center gap-2 cursor-pointer", children: [
+            /* @__PURE__ */ u(
+              "input",
+              {
+                type: "checkbox",
+                checked: enableSessionSummary,
+                onChange: (e) => {
+                  setEnableSessionSummary(targetChecked(e));
+                  rerender$1();
+                }
+              }
+            ),
+            /* @__PURE__ */ u("div", { children: [
+              /* @__PURE__ */ u("span", { className: "text-[var(--text)]", children: "Session-end summary" }),
+              /* @__PURE__ */ u("span", { className: "text-[var(--muted)] block text-[.7rem]", children: "Summarize accomplishments when a session is reset" })
+            ] })
+          ] })
+        ] })
+      ] }),
       /* @__PURE__ */ u("div", { children: [
         /* @__PURE__ */ u(SubHeading, { title: "Session Export" }),
         /* @__PURE__ */ u("p", { className: "text-xs text-[var(--muted)]", style: { margin: "0 0 8px" }, children: "Export session transcripts into searchable memory when a session is rolled over." }),

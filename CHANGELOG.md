@@ -19,6 +19,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260421.01] - 2026-04-21
+### Added
+- [channels] Centralized command registry for all channels (#794)
+- Gemini thought_signature round-tripping and schema validation fixes (#795)
+- Self-improving agent loop — skills, memory lifecycle, deployment (#803)
+- [web] Add GitHub Issues and Discussions links with count badges (#806)
+- [sandbox] Install Node.js 22 LTS via NodeSource (#807)
+- [web] Render markdown as HTML in chat messages (#808)
+- [skills] Bundle 101 default skills with category UI and format fallback (#797)
+
+
+### Changed
+- [tools] Split skill_tools.rs into submodules
+
+
+### Fixed
+- [ci] Add safe.directory for container jobs (gix ownership check)
+- [slack] Strip leading slash from commands before gateway dispatch (#804)
+- [mcp] Implement legacy SSE transport for endpoint discovery (#805)
+- [ci] Biome formatting and file size allowlist
+- [sandbox] Verify image in Podman store after BuildKit build (#811)
+- [providers] Disable strict tools for Fireworks Kimi router (#812)
+- [ci] Npm --ignore-scripts and git install ordering
+- [ci] Pass safe.directory to gix via env vars in rust-ci container
+
 ## [20260420.02] - 2026-04-20
 ### Fixed
 - [ci] Address main rust failures

@@ -25,23 +25,81 @@ function clearChatEmptyState(): void {
 	S.chatMsgBox.classList.remove("chat-messages-empty");
 }
 
-// Scroll chat to bottom and keep it pinned until layout settles.
-// Uses a ResizeObserver to catch any late layout shifts (sidebar re-render,
-// font loading, async style recalc) and re-scrolls until stable.
-export function scrollChatToBottom(): void {
+// Scroll state for rAF-based auto-scroll — prevents re-entrancy during streaming
+let isAutoScrolling = false;
+
+// Scroll chat to bottom using requestAnimationFrame to sync with browser paint cycle.
+// When force=false (default), checks isChatAtBottom() BEFORE scheduling to respect
+// user scroll intent. Pass force=true for imperative scrolls (indicator click,
+// autoScrollMode "always", user-sent messages).
+export function scrollChatToBottom(force = false): void {
 	if (!S.chatMsgBox) return;
-	S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
-	const box = S.chatMsgBox;
-	const observer = new ResizeObserver(() => {
-		box.scrollTop = box.scrollHeight;
+	if (!force && (isAutoScrolling || !isChatAtBottom())) return;
+
+	isAutoScrolling = true;
+
+	requestAnimationFrame(() => {
+		if (S.chatMsgBox) {
+			S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
+			hideNewContentIndicator();
+		}
+		isAutoScrolling = false;
 	});
-	observer.observe(box);
-	setTimeout(() => {
-		observer.disconnect();
-	}, 500);
 }
 
-export function chatAddMsg(cls: string, content: string, isHtml?: boolean): HTMLDivElement | null {
+/** Returns true when the chat scroll position is within `threshold` px of the bottom. */
+export function isChatAtBottom(threshold = 60): boolean {
+	if (!S.chatMsgBox) return true;
+	const { scrollTop, scrollHeight, clientHeight } = S.chatMsgBox;
+	return scrollHeight - scrollTop - clientHeight < threshold;
+}
+
+/**
+ * Scroll to bottom only if the user is already near the bottom (smart auto-scroll).
+ *
+ * Dispatch pattern:
+ * - autoScrollMode === "always" → force scroll (bypasses isChatAtBottom guard)
+ * - isChatAtBottom() === true → user at bottom, scroll with new content
+ * - else → show indicator, let user choose when to scroll
+ */
+export function smartScrollToBottom(): void {
+	if (S.autoScrollMode === "always") {
+		scrollChatToBottom(true);
+		return;
+	}
+	if (isChatAtBottom()) {
+		scrollChatToBottom();
+	} else {
+		showNewContentIndicator();
+	}
+}
+
+/** Show the "new content" floating indicator on the chat area. */
+export function showNewContentIndicator(): void {
+	if (!S.chatMsgBox) return;
+	let indicator = S.chatMsgBox.querySelector(".new-content-indicator") as HTMLButtonElement | null;
+	if (!indicator) {
+		indicator = document.createElement("button") as HTMLButtonElement;
+		indicator.className = "new-content-indicator";
+		indicator.type = "button";
+		indicator.textContent = "↓ New messages";
+		indicator.addEventListener("click", () => {
+			scrollChatToBottom(true);
+		});
+		S.chatMsgBox.appendChild(indicator);
+	}
+}
+
+/** Hide the "new content" floating indicator. */
+export function hideNewContentIndicator(): void {
+	if (!S.chatMsgBox) return;
+	const indicator = S.chatMsgBox.querySelector(".new-content-indicator");
+	if (indicator) indicator.remove();
+}
+
+export type MessageRole = "user" | "assistant" | "system" | "error";
+
+export function chatAddMsg(cls: MessageRole, content: string, isHtml?: boolean): HTMLDivElement | null {
 	if (!S.chatMsgBox) return null;
 	clearChatEmptyState();
 	const el = document.createElement("div");
@@ -57,7 +115,10 @@ export function chatAddMsg(cls: string, content: string, isHtml?: boolean): HTML
 		el.textContent = content;
 	}
 	S.chatMsgBox.appendChild(el);
-	if (!S.chatBatchLoading) S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
+	if (!S.chatBatchLoading) {
+		if (cls === "user") scrollChatToBottom(true);
+		else smartScrollToBottom();
+	}
 	return el;
 }
 
@@ -65,7 +126,7 @@ export function chatAddMsg(cls: string, content: string, isHtml?: boolean): HTML
  * Add a user message with image thumbnails below the text.
  */
 export function chatAddMsgWithImages(
-	cls: string,
+	cls: MessageRole,
 	htmlContent: string,
 	images: ImageAttachment[],
 ): HTMLDivElement | null {
@@ -94,7 +155,10 @@ export function chatAddMsgWithImages(
 		el.appendChild(thumbRow);
 	}
 	S.chatMsgBox.appendChild(el);
-	if (!S.chatBatchLoading) S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
+	if (!S.chatBatchLoading) {
+		if (cls === "user") scrollChatToBottom(true);
+		else smartScrollToBottom();
+	}
 	return el;
 }
 
@@ -205,7 +269,7 @@ export function chatAddErrorCard(err: ErrorCardData): void {
 	}
 
 	S.chatMsgBox.appendChild(el);
-	S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
+	smartScrollToBottom();
 }
 
 export function chatAddErrorMsg(message: string): void {
@@ -247,7 +311,7 @@ export function renderApprovalCard(requestId: string, command: string): void {
 	countdown.textContent = `${remaining}s`;
 
 	S.chatMsgBox.appendChild(card);
-	S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
+	smartScrollToBottom();
 }
 
 export function resolveApproval(requestId: string, decision: string, command: string | null, card: HTMLElement): void {

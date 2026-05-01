@@ -10,7 +10,7 @@ export interface SpaRoutes {
 	settings: string;
 	providers: string;
 	security: string;
-	identity: string;
+	profile: string;
 	config: string;
 	logs: string;
 	nodes: string;
@@ -213,6 +213,8 @@ export interface GonData {
 	heartbeat_config: HeartbeatConfig;
 	heartbeat_runs: CronRunRecord[];
 	voice_enabled: boolean;
+	stt_enabled: boolean;
+	tts_enabled: boolean;
 	graphql_enabled: boolean;
 	terminal_enabled: boolean;
 	git_branch?: string;
@@ -226,6 +228,9 @@ export interface GonData {
 	routes: SpaRoutes;
 	started_at: number;
 	openclaw_detected: boolean;
+	claude_detected: boolean;
+	codex_detected: boolean;
+	hermes_detected: boolean;
 	sessions_recent: SessionMeta[];
 	agents: unknown[];
 	webhooks: unknown[];

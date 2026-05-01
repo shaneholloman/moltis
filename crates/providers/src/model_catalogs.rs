@@ -110,6 +110,25 @@ pub(crate) const ALIBABA_CODING_MODELS: &[(&str, &str)] = &[
     ("glm-4.7", "GLM-4.7"),
 ];
 
+/// Known DeepInfra models.
+/// See: <https://deepinfra.com/models>
+pub(crate) const DEEPINFRA_MODELS: &[(&str, &str)] = &[
+    (
+        "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+        "Llama 4 Maverick",
+    ),
+    ("meta-llama/Llama-4-Scout-17B-16E-Instruct", "Llama 4 Scout"),
+    ("deepseek-ai/DeepSeek-V3", "DeepSeek V3"),
+    ("deepseek-ai/DeepSeek-R1", "DeepSeek R1"),
+    ("Qwen/Qwen3-235B-A22B", "Qwen3 235B"),
+    ("Qwen/Qwen3-32B", "Qwen3 32B"),
+    (
+        "mistralai/Mistral-Small-24B-Instruct-2501",
+        "Mistral Small 24B",
+    ),
+    ("google/gemma-3-27b-it", "Gemma 3 27B"),
+];
+
 /// Known DeepSeek models.
 pub(crate) const DEEPSEEK_MODELS: &[(&str, &str)] = &[
     ("deepseek-chat", "DeepSeek Chat"),
@@ -241,6 +260,16 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         local_only: false,
     },
     OpenAiCompatDef {
+        config_name: "deepinfra",
+        env_key: "DEEPINFRA_API_KEY",
+        env_base_url_key: "DEEPINFRA_BASE_URL",
+        default_base_url: "https://api.deepinfra.com/v1/openai",
+        models: DEEPINFRA_MODELS,
+        supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
+    },
+    OpenAiCompatDef {
         config_name: "deepseek",
         env_key: "DEEPSEEK_API_KEY",
         env_base_url_key: "DEEPSEEK_BASE_URL",
@@ -315,6 +344,7 @@ mod tests {
         assert!(!CEREBRAS_MODELS.is_empty());
         assert!(!MINIMAX_MODELS.is_empty());
         assert!(!ZAI_MODELS.is_empty());
+        assert!(!DEEPINFRA_MODELS.is_empty());
         assert!(!MOONSHOT_MODELS.is_empty());
         assert!(!GEMINI_MODELS.is_empty());
     }
@@ -335,6 +365,7 @@ mod tests {
             ANTHROPIC_MODELS,
             MISTRAL_MODELS,
             CEREBRAS_MODELS,
+            DEEPINFRA_MODELS,
             MINIMAX_MODELS,
             ZAI_MODELS,
             MOONSHOT_MODELS,
@@ -484,5 +515,64 @@ mod tests {
             deepseek,
             "accounts/fireworks/routers/kimi-k2p5-turbo"
         ));
+    }
+
+    /// Cross-validate that every provider registered in this crate appears in
+    /// the canonical `KNOWN_PROVIDER_NAMES` list in `moltis-config`.
+    ///
+    /// If this test fails, you added a provider to `moltis-providers` without
+    /// updating `crates/config/src/schema/providers.rs::KNOWN_PROVIDER_NAMES`.
+    #[test]
+    fn all_registered_providers_in_canonical_known_list() {
+        use moltis_config::schema::KNOWN_PROVIDER_NAMES;
+
+        // Built-in providers
+        let mut provider_names: Vec<&str> = vec!["anthropic", "openai"];
+
+        // OpenAI-compatible table-driven providers
+        for def in OPENAI_COMPAT_PROVIDERS {
+            provider_names.push(def.config_name);
+        }
+
+        // Feature-gated providers (always check names, regardless of feature).
+        //
+        // NOTE: This list must be maintained manually because `#[cfg(feature)]`
+        // attributes make it impossible to discover these names at test time
+        // when the feature is disabled.  When adding a new feature-gated
+        // provider registration in `registry/registration.rs` (e.g. a new
+        // `register_*_providers` method gated behind a cargo feature), add its
+        // config name here too.
+        provider_names.extend_from_slice(&[
+            "github-copilot",
+            "kimi-code",
+            "local-llm",
+            "openai-codex",
+            "groq",
+            "xai",
+        ]);
+
+        for name in &provider_names {
+            assert!(
+                KNOWN_PROVIDER_NAMES.contains(name),
+                "provider \"{name}\" is registered in moltis-providers but missing from \
+                 KNOWN_PROVIDER_NAMES in crates/config/src/schema/providers.rs — add it there"
+            );
+        }
+    }
+
+    /// Ensure `KNOWN_PROVIDER_NAMES` has no duplicates.
+    #[test]
+    fn canonical_known_list_has_no_duplicates() {
+        use moltis_config::schema::KNOWN_PROVIDER_NAMES;
+
+        let mut sorted: Vec<&str> = KNOWN_PROVIDER_NAMES.to_vec();
+        sorted.sort();
+        for window in sorted.windows(2) {
+            assert_ne!(
+                window[0], window[1],
+                "duplicate entry \"{0}\" in KNOWN_PROVIDER_NAMES",
+                window[0]
+            );
+        }
     }
 }

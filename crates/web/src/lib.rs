@@ -185,8 +185,16 @@ fn build_api_routes() -> Router<AppState> {
             get(moltis_httpd::tools_routes::config_template),
         )
         .route(
+            "/api/config/provenance",
+            get(moltis_httpd::tools_routes::config_provenance),
+        )
+        .route(
             "/api/restart",
             axum::routing::post(moltis_httpd::tools_routes::restart),
+        )
+        .route(
+            "/api/system/update",
+            axum::routing::post(moltis_httpd::tools_routes::update),
         )
         .route("/api/sessions", get(api::api_sessions_handler))
         .route(
@@ -219,6 +227,10 @@ fn build_api_routes() -> Router<AppState> {
         .route(
             "/api/metrics/history",
             get(moltis_httpd::metrics_routes::api_metrics_history_handler),
+        )
+        .route(
+            "/api/metrics/insights",
+            get(moltis_httpd::metrics_routes::api_metrics_insights_handler),
         );
 
     protected

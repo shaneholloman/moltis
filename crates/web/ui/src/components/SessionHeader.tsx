@@ -4,7 +4,7 @@
 // Preact component reading sessionStore.activeSession.
 
 import type { VNode } from "preact";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { onEvent } from "../events";
 import * as gon from "../gon";
 import { parseAgentsListPayload, sendRpc } from "../helpers";
@@ -203,17 +203,22 @@ export function SessionHeader({
 	const startRename = useCallback(() => {
 		if (!canRename) return;
 		setRenaming(true);
-		requestAnimationFrame(() => {
-			if (inputRef.current) {
-				inputRef.current.value = fullName;
-				inputRef.current.focus();
-				inputRef.current.select();
-			}
-		});
-	}, [canRename, fullName]);
+	}, [canRename]);
+
+	// Populate, focus, and select the rename input synchronously after
+	// render (useLayoutEffect) so there is no rAF race with Playwright
+	// or other async interactions that could blur the input.
+	useLayoutEffect(() => {
+		if (renaming && inputRef.current) {
+			inputRef.current.value = fullName;
+			inputRef.current.focus();
+			inputRef.current.select();
+		}
+	}, [renaming, fullName]);
 
 	const commitRename = useCallback(() => {
-		const val = inputRef.current?.value.trim() || "";
+		if (!inputRef.current) return;
+		const val = inputRef.current.value.trim() || "";
 		setRenaming(false);
 		if (val && val !== fullName) {
 			sendRpc("sessions.patch", { key: currentKey, label: val }).then((res) => {
@@ -234,6 +239,16 @@ export function SessionHeader({
 		},
 		[commitRename],
 	);
+
+	const [generatingTitle, setGeneratingTitle] = useState(false);
+	const onGenerateTitle = useCallback(() => {
+		setGeneratingTitle(true);
+		sendRpc<{ label?: string }>("sessions.generate_title", { key: currentKey })
+			.then((res) => {
+				if (res?.ok) fetchSessions();
+			})
+			.finally(() => setGeneratingTitle(false));
+	}, [currentKey]);
 
 	const onFork = useCallback(() => {
 		sendRpc<{ sessionKey?: string }>("sessions.fork", { key: currentKey }).then((res) => {
@@ -501,9 +516,19 @@ export function SessionHeader({
 		));
 
 	const renameCta = showName && showRenameButton && canRename && !renaming && (
-		<button className={actionButtonClass} onClick={startRename} title="Rename session">
-			Rename
-		</button>
+		<div className="flex items-center gap-1">
+			<button className={actionButtonClass} onClick={startRename} title="Rename session">
+				Rename
+			</button>
+			<button
+				className={actionButtonClass}
+				onClick={onGenerateTitle}
+				disabled={generatingTitle}
+				title="Auto-generate title from conversation"
+			>
+				{generatingTitle ? "..." : "Auto-title"}
+			</button>
+		</div>
 	);
 
 	return (
@@ -550,17 +575,6 @@ export function SessionHeader({
 						{session?.archived ? "Unarchive" : "Archive"}
 					</button>
 				)}
-				{showDelete && !isMain && (
-					<button
-						className={`${actionButtonClass} chat-session-btn-danger inline-flex items-center gap-1.5`}
-						onClick={onDelete}
-						title="Delete session"
-						style={{ background: "var(--error)", borderColor: "var(--error)", color: "#fff" }}
-					>
-						<span className="icon icon-sm icon-x-circle shrink-0" />
-						Delete
-					</button>
-				)}
 				{showFork && !isCron && (
 					<button
 						className={`${actionButtonClass} inline-flex items-center gap-1.5`}
@@ -579,6 +593,17 @@ export function SessionHeader({
 					>
 						<span className="icon icon-sm icon-share shrink-0" />
 						Share
+					</button>
+				)}
+				{showDelete && !isMain && (
+					<button
+						className={`${actionButtonClass} chat-session-btn-danger inline-flex items-center gap-1.5`}
+						onClick={onDelete}
+						title="Delete session"
+						style={{ background: "var(--error)", borderColor: "var(--error)", color: "#fff" }}
+					>
+						<span className="icon icon-sm icon-x-circle shrink-0" />
+						Delete
 					</button>
 				)}
 				{showStop && canStop && (

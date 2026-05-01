@@ -1,24 +1,5 @@
 const { expect, test } = require("../base-test");
-const { expectPageContentMounted, navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
-
-async function spoofSafari(page) {
-	await page.addInitScript(() => {
-		const safariUserAgent =
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15";
-		Object.defineProperty(Navigator.prototype, "userAgent", {
-			configurable: true,
-			get() {
-				return safariUserAgent;
-			},
-		});
-		Object.defineProperty(Navigator.prototype, "vendor", {
-			configurable: true,
-			get() {
-				return "Apple Computer, Inc.";
-			},
-		});
-	});
-}
+const { navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 function graphqlHttpStatus(page) {
 	return page.evaluate(async () => {
@@ -30,12 +11,14 @@ function graphqlHttpStatus(page) {
 	});
 }
 
-function isRetryableNavigationError(error) {
+function isRetryableMockError(error) {
 	const message = error?.message || String(error || "");
 	return (
 		message.includes("net::ERR_ABORTED") ||
 		message.includes("Execution context was destroyed") ||
-		message.includes("Target page, context or browser has been closed")
+		message.includes("Target page, context or browser has been closed") ||
+		message.includes("Timeout") ||
+		message.includes("exceeded while waiting")
 	);
 }
 
@@ -90,8 +73,7 @@ async function mockChannelsStatus(page, { channels, senders = [], allowRetryOwne
 					} else {
 						await channelsPage.prefetchChannels();
 					}
-					await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-					await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+					await new Promise((resolve) => setTimeout(resolve, 100));
 				},
 				{ channels, senders, allowRetryOwnership, label },
 			);
@@ -118,7 +100,7 @@ async function mockChannelsStatus(page, { channels, senders = [], allowRetryOwne
 			return;
 		} catch (error) {
 			lastError = error;
-			if (!isRetryableNavigationError(error) || attempt === 2) break;
+			if (!isRetryableMockError(error) || attempt === 2) break;
 		}
 	}
 	if (lastError) throw lastError;
@@ -131,17 +113,17 @@ test.describe("Settings navigation", () => {
 		await expect(page.locator("#providersTitle")).toBeVisible();
 	}
 
-	test("/settings redirects to /settings/identity", async ({ page }) => {
+	test("/settings redirects to /settings/profile", async ({ page }) => {
 		await navigateAndWait(page, "/settings");
-		await expect(page).toHaveURL(/\/settings\/identity$/);
-		await expect(page.getByRole("heading", { name: "Identity", exact: true })).toBeVisible();
+		await expect(page).toHaveURL(/\/settings\/profile$/);
+		await expect(page.getByRole("heading", { name: "User Profile", exact: true })).toBeVisible();
 	});
 
 	test("settings nav keeps distinct icons for nodes, remote access, network audit, and openclaw import", async ({
 		page,
 	}) => {
 		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
+		await navigateAndWait(page, "/settings/profile");
 		await expect(page.locator(".settings-sidebar-nav")).toBeVisible();
 
 		const masks = await page.evaluate(() => {
@@ -197,7 +179,7 @@ test.describe("Settings navigation", () => {
 	});
 
 	const settingsSections = [
-		{ id: "identity", heading: "Identity" },
+		{ id: "profile", heading: "User Profile" },
 		{ id: "memory", heading: "Memory" },
 		{ id: "environment", heading: "Environment" },
 		{ id: "crons", heading: "Cron Jobs" },
@@ -224,6 +206,7 @@ test.describe("Settings navigation", () => {
 		test(`settings/${section.id} loads without errors`, async ({ page }) => {
 			const pageErrors = watchPageErrors(page);
 			await navigateAndWait(page, `/settings/${section.id}`);
+			await waitForWsConnected(page);
 
 			await expect(page).toHaveURL(new RegExp(`/settings/${section.id}$`));
 
@@ -484,7 +467,7 @@ test.describe("Settings navigation", () => {
 	});
 
 	test("identity form elements render", async ({ page }) => {
-		await navigateAndWait(page, "/settings/identity");
+		await navigateAndWait(page, "/settings/profile");
 
 		// Identity page should have a name input and soul/description textarea
 		const content = page.locator("#pageContent");
@@ -695,105 +678,30 @@ test.describe("Settings navigation", () => {
 
 	test("identity name fields autosave on blur", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
-
-		// Wait for the identity form to be fully initialised (no pending save).
-		await expect(page.locator('button[type="submit"]')).not.toHaveText(/Saving/, { timeout: 5_000 });
-
-		const nextValues = await page.evaluate(() => {
-			var id = window.__MOLTIS__?.identity || {};
-			var nextBotName = id.name === "AutoBotNameA" ? "AutoBotNameB" : "AutoBotNameA";
-			var nextUserName = id.user_name === "AutoUserNameA" ? "AutoUserNameB" : "AutoUserNameA";
-			return { nextBotName, nextUserName };
-		});
-
-		const botNameInput = page.getByPlaceholder("e.g. Rex");
-		await botNameInput.fill(nextValues.nextBotName);
-		// Ensure fill() has propagated before triggering blur
-		await expect(botNameInput).toHaveValue(nextValues.nextBotName);
-		await botNameInput.blur();
-		// The autosave RPC can be slow under CI load; wait for the
-		// data update (authoritative) rather than the transient "Saved"
-		// flash which only lasts 2 s and can be missed.
-		await expect
-			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.name || "").trim()), { timeout: 15_000 })
-			.toBe(nextValues.nextBotName);
-
-		// Wait for the first save to fully settle (nameSaving → false)
-		// before triggering the second blur-save.
-		await expect(page.locator('button[type="submit"]')).not.toHaveText(/Saving/, { timeout: 5_000 });
+		await navigateAndWait(page, "/settings/profile");
 
 		const userNameInput = page.getByPlaceholder("e.g. Alice");
-		await userNameInput.fill(nextValues.nextUserName);
-		await expect(userNameInput).toHaveValue(nextValues.nextUserName);
+		await expect(userNameInput).toBeVisible({ timeout: 5_000 });
+		const currentVal = await userNameInput.inputValue();
+		const nextUserName = currentVal === "AutoUserNameA" ? "AutoUserNameB" : "AutoUserNameA";
+
+		await userNameInput.fill(nextUserName);
+		await expect(userNameInput).toHaveValue(nextUserName);
 		await userNameInput.blur();
-		await expect
-			.poll(() => page.evaluate(() => (window.__MOLTIS__?.identity?.user_name || "").trim()), { timeout: 15_000 })
-			.toBe(nextValues.nextUserName);
+
+		// Wait for the "Saved" flash (confirms autosave round-tripped).
+		await expect(page.getByText("Saved")).toBeVisible({ timeout: 15_000 });
+
+		// Reload and verify the value persisted.
+		await page.reload();
+		await expect(page.getByPlaceholder("e.g. Alice")).toHaveValue(nextUserName, { timeout: 10_000 });
 
 		expect(pageErrors).toEqual([]);
 	});
 
-	test("selecting identity emoji updates favicon live without requiring notice in Chromium", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
-
-		const pickBtn = page.getByRole("button", { name: "Pick", exact: true });
-		await expect(pickBtn).toBeVisible();
-		await pickBtn.click();
-
-		const selectedEmoji = await page.evaluate(() => {
-			var current = (window.__MOLTIS__?.identity?.emoji || "").trim();
-			var options = ["🦊", "🐙", "🤖", "🐶"];
-			return options.find((emoji) => emoji !== current) || "🦊";
-		});
-		const iconHrefBefore = await page.evaluate(() => document.querySelector('link[rel="icon"]')?.href || "");
-		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect
-			.poll(() =>
-				page.evaluate((beforeHref) => {
-					var href = document.querySelector('link[rel="icon"]')?.href || "";
-					return href.startsWith("data:image/png") && href !== beforeHref;
-				}, iconHrefBefore),
-			)
-			.toBeTruthy();
-		await expect(
-			page.getByText("favicon updates requires reload and may be cached for minutes", { exact: false }),
-		).toHaveCount(0);
-		await expect(page.getByRole("button", { name: "requires reload", exact: true })).toHaveCount(0);
-
-		expect(pageErrors).toEqual([]);
-	});
-
-	test("safari shows favicon reload notice and button triggers full page refresh", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await spoofSafari(page);
-		await navigateAndWait(page, "/settings/identity");
-
-		const pickBtn = page.getByRole("button", { name: "Pick", exact: true });
-		await expect(pickBtn).toBeVisible();
-		await pickBtn.click();
-
-		const selectedEmoji = await page.evaluate(() => {
-			var current = (window.__MOLTIS__?.identity?.emoji || "").trim();
-			var options = ["🦊", "🐙", "🤖", "🐶"];
-			return options.find((emoji) => emoji !== current) || "🦊";
-		});
-		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect(
-			page.getByText("favicon updates requires reload and may be cached for minutes", { exact: false }),
-		).toBeVisible();
-		const reloadBtn = page.getByRole("button", { name: "requires reload", exact: true });
-		await expect(reloadBtn).toBeVisible();
-
-		await Promise.all([page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame()), reloadBtn.click()]);
-		await expectPageContentMounted(page);
-		await expect(page).toHaveURL(/\/settings\/identity$/);
-
-		expect(pageErrors).toEqual([]);
-	});
+	// Removed: "selecting identity emoji updates favicon" and "safari favicon reload notice"
+	// Emoji picker moved from IdentitySection to AgentsPage in the agents architecture
+	// simplification (#898). These tests tested code that no longer exists on the profile page.
 
 	test("environment page has add form", async ({ page }) => {
 		await navigateAndWait(page, "/settings/environment");
@@ -1244,71 +1152,35 @@ test.describe("Settings navigation", () => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/channels");
 
-		await page.evaluate(async () => {
-			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app.js script not found");
-			const appUrl = new URL(appScript.src, window.location.origin).href;
-			const marker = "js/app.js";
-			const markerIdx = appUrl.indexOf(marker);
-			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
-			const prefix = appUrl.slice(0, markerIdx);
-			const state = await import(`${prefix}js/state.js`);
-			const channelsPage = await import(`${prefix}js/page-channels.js`);
-			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
-			state.setWs({
-				readyState: wsOpen,
-				send(raw) {
-					const req = JSON.parse(raw || "{}");
-					const resolver = state.pending[req.id];
-					if (!resolver) return;
-					if (req.method === "channels.status") {
-						resolver({
-							ok: true,
-							payload: {
-								channels: [
-									{
-										type: "matrix",
-										account_id: "moltis-testbot",
-										name: "Matrix (moltis-testbot)",
-										status: "connected",
-										details: "@moltis-testbot:matrix.org on https://matrix.org",
-										sessions: [],
-									},
-								],
-							},
-						});
-					} else if (req.method === "channels.senders.list") {
-						resolver({
-							ok: true,
-							payload: {
-								senders: [
-									{
-										peer_id: "@alice:matrix.org",
-										username: "@alice:matrix.org",
-										sender_name: "Alice",
-										message_count: 1,
-										last_seen: 1700000000,
-										allowed: false,
-										otp_pending: {
-											code: "954502",
-											expires_at: 1700000300,
-										},
-									},
-								],
-							},
-						});
-					} else {
-						resolver({ ok: false, error: { message: `unexpected rpc in matrix senders test: ${req.method}` } });
-					}
-					delete state.pending[req.id];
+		await mockChannelsStatus(page, {
+			label: "matrix senders test",
+			channels: [
+				{
+					type: "matrix",
+					account_id: "moltis-testbot",
+					name: "Matrix (moltis-testbot)",
+					status: "connected",
+					details: "@moltis-testbot:matrix.org on https://matrix.org",
+					sessions: [],
 				},
-			});
-			state.setConnected(true);
-			await channelsPage.prefetchChannels();
-			await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+			],
+			senders: [
+				{
+					peer_id: "@alice:matrix.org",
+					username: "@alice:matrix.org",
+					sender_name: "Alice",
+					message_count: 1,
+					last_seen: 1700000000,
+					allowed: false,
+					otp_pending: {
+						code: "954502",
+						expires_at: 1700000300,
+					},
+				},
+			],
 		});
 
-		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
+		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible({ timeout: 10_000 });
 		await page.getByRole("tab", { name: /Senders/ }).click();
 		await expect.poll(() => page.locator(".senders-table tbody tr").count(), { timeout: 10_000 }).toBe(1);
 		await expect(page.getByText("Alice", { exact: true })).toBeVisible();
@@ -1321,7 +1193,7 @@ test.describe("Settings navigation", () => {
 
 	test("graphql toggle applies immediately", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/identity");
+		await navigateAndWait(page, "/settings/profile");
 		await waitForWsConnected(page);
 
 		const graphQlNavItem = page.locator(".settings-nav-item", { hasText: "GraphQL" });
@@ -1365,7 +1237,7 @@ test.describe("Settings navigation", () => {
 	});
 
 	test("sidebar groups and order match product layout", async ({ page }) => {
-		await navigateAndWait(page, "/settings/identity");
+		await navigateAndWait(page, "/settings/profile");
 
 		await expect(page.locator(".settings-group-label").nth(0)).toHaveText("General");
 		await expect(page.locator(".settings-group-label").nth(1)).toHaveText("Security");
@@ -1374,7 +1246,7 @@ test.describe("Settings navigation", () => {
 
 		const navItems = (await page.locator(".settings-nav-item").allTextContents()).map((text) => text.trim());
 		const expectedPrefix = [
-			"Identity",
+			"User Profile",
 			"Agents",
 			"Nodes",
 			"Projects",
@@ -1399,6 +1271,7 @@ test.describe("Settings navigation", () => {
 			"MCP",
 			"Skills",
 		);
+		if (navItems.includes("Imports")) expectedPrefix.push("Imports");
 		const expectedSystem = ["Terminal", "Monitoring", "Logs"];
 		const expected = [...expectedPrefix];
 		if (navItems.includes("OpenClaw Import")) expected.push("OpenClaw Import");

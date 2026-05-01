@@ -41,9 +41,9 @@ import {
 import { ConfigSection, GraphqlSection } from "./sections/ConfigSection";
 import { EnvironmentSection } from "./sections/EnvironmentSection";
 import { IdentitySection } from "./sections/IdentitySection";
+import { ImportSection } from "./sections/ImportSection";
 import { MemorySection } from "./sections/MemorySection";
 import { NotificationsSection } from "./sections/NotificationsSection";
-import { OpenClawImportSection } from "./sections/OpenClawImportSection";
 import { RemoteAccessSection } from "./sections/RemoteAccessSection";
 import { SecuritySection } from "./sections/SecuritySection";
 import { SshSection } from "./sections/SshSection";
@@ -56,8 +56,8 @@ import { VoiceSection } from "./sections/VoiceSection";
 const sections: SectionItem[] = [
 	{ group: "General" },
 	{
-		id: "identity",
-		label: "Identity",
+		id: "profile",
+		label: "User Profile",
 		icon: <span className="icon icon-person" />,
 	},
 	{
@@ -182,7 +182,7 @@ const sections: SectionItem[] = [
 	},
 	{
 		id: "import",
-		label: "OpenClaw Import",
+		label: "Imports",
 		icon: <span className="icon icon-openclaw" />,
 	},
 	{
@@ -203,7 +203,14 @@ function getVisibleSections(): SectionItem[] {
 	return sections.filter((s) => {
 		if (!s.id) return true;
 		if (s.id === "graphql" && !gon.get("graphql_enabled")) return false;
-		if (s.id === "import" && !gon.get("openclaw_detected")) return false;
+		if (
+			s.id === "import" &&
+			!gon.get("openclaw_detected") &&
+			!gon.get("claude_detected") &&
+			!gon.get("codex_detected") &&
+			!gon.get("hermes_detected")
+		)
+			return false;
 		if (s.id === "vault" && (!vs || vs === "disabled")) return false;
 		return true;
 	});
@@ -373,7 +380,7 @@ function SettingsPage(): VNode {
 							<PageSection key={`${section}:${subPath}`} initFn={ps.init} teardownFn={ps.teardown} subPath={subPath} />
 						)
 					) : null}
-					{section === "identity" ? <IdentitySection /> : null}
+					{section === "profile" ? <IdentitySection /> : null}
 					{section === "memory" ? <MemorySection /> : null}
 					{section === "environment" ? <EnvironmentSection /> : null}
 					{section === "tools" ? <ToolsSection /> : null}
@@ -395,7 +402,7 @@ function SettingsPage(): VNode {
 						)
 					) : null}
 					{section === "notifications" ? <NotificationsSection /> : null}
-					{section === "import" ? <OpenClawImportSection /> : null}
+					{section === "import" ? <ImportSection /> : null}
 					{section === "graphql" ? <GraphqlSection /> : null}
 					{section === "config" ? <ConfigSection /> : null}
 				</div>
@@ -404,7 +411,7 @@ function SettingsPage(): VNode {
 	);
 }
 
-const DEFAULT_SECTION = "identity";
+const DEFAULT_SECTION = "profile";
 
 registerPrefix(
 	routes.settings!,
@@ -415,7 +422,12 @@ registerPrefix(
 		container.style.cssText = "flex-direction:row;padding:0;overflow:hidden;";
 		const parts = (param || "").replace(/:/g, "/").split("/").filter(Boolean);
 		const requestedSection = parts[0] || "";
-		const requestedSectionAlias = requestedSection === "tailscale" ? "remote-access" : requestedSection;
+		const requestedSectionAlias =
+			requestedSection === "tailscale"
+				? "remote-access"
+				: requestedSection === "identity"
+					? "profile"
+					: requestedSection;
 		const subPath = parts.slice(1).join("/");
 		const isValidSection = requestedSectionAlias && getSectionItems().some((s) => s.id === requestedSectionAlias);
 		const section = isValidSection ? requestedSectionAlias : DEFAULT_SECTION;

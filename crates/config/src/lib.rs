@@ -6,6 +6,7 @@
 //! Supports `${ENV_VAR}` substitution in all string values.
 
 pub mod agent_defs;
+pub mod defaults;
 pub mod env_subst;
 pub mod error;
 pub mod loader;
@@ -23,9 +24,10 @@ pub use {
     loader::{
         DEFAULT_SOUL, LoadedWorkspaceMarkdown, WorkspaceMarkdownSource, agent_workspace_dir,
         agents_path, apply_env_overrides, boot_path, clear_config_dir, clear_data_dir,
-        clear_share_dir, config_dir, data_dir, discover_and_load, extract_yaml_frontmatter,
-        find_or_default_config_path, find_user_global_config_file, guidelines_path, heartbeat_path,
-        home_dir, identity_path, load_agents_md, load_agents_md_for_agent, load_boot_md,
+        clear_share_dir, compact_config, config_dir, data_dir, discover_and_load,
+        discover_and_load_readonly, extract_yaml_frontmatter, find_or_default_config_path,
+        find_user_global_config_file, guidelines_path, heartbeat_path, home_dir, identity_path,
+        initialize_config, load_agents_md, load_agents_md_for_agent, load_boot_md,
         load_boot_md_for_agent, load_guidelines_md, load_guidelines_md_for_agent,
         load_heartbeat_md, load_identity, load_identity_for_agent, load_memory_md,
         load_memory_md_for_agent, load_memory_md_for_agent_with_source, load_soul,
@@ -44,13 +46,15 @@ pub use {
     schema::{
         AgentIdentity, AgentMemoryWriteMode, AgentPreset, AgentsConfig, AuthConfig, CacheRetention,
         CalDavAccountConfig, CalDavConfig, ChannelToolPolicyOverride, ChannelsConfig, ChatConfig,
-        CompactionConfig, CompactionMode, GeoLocation, GroupToolPolicy, MemoryBackend,
+        CodeIndexTomlConfig, CompactionConfig, CompactionMode, GeoLocation, GroupToolPolicy,
+        HeartbeatConfig, HomeAssistantAccountConfig, HomeAssistantConfig, MemoryBackend,
         MemoryCitationsMode, MemoryProvider, MemoryScope, MemorySearchMergeStrategy, MemoryStyle,
-        MessageQueueMode, MoltisConfig, NgrokConfig, PresetMemoryConfig, PresetToolPolicy,
-        PromptMemoryMode, ResolvedIdentity, SessionAccessPolicyConfig, SessionExportMode, Timezone,
-        ToolMode, ToolPolicyConfig, ToolRegistryMode, UserProfile, UserProfileWriteMode,
-        VoiceConfig, VoiceElevenLabsConfig, VoiceOpenAiConfig, VoiceSttConfig, VoiceSttProvider,
-        VoiceTtsConfig, VoiceWhisperConfig, WireApi,
+        MessageQueueMode, ModePreset, ModesConfig, MoltisConfig, NgrokConfig, PresetMemoryConfig,
+        PresetToolPolicy, PromptMemoryMode, ResolvedIdentity, SessionAccessPolicyConfig,
+        SessionExportMode, Timezone, ToolMode, ToolPolicyConfig, ToolRegistryMode, UserProfile,
+        UserProfileWriteMode, VoiceConfig, VoiceElevenLabsConfig, VoiceOpenAiConfig,
+        VoiceSttConfig, VoiceSttProvider, VoiceTtsConfig, VoiceTtsProvider, VoiceWhisperConfig,
+        WireApi, parse_byte_size,
     },
     validate::{Diagnostic, Severity, ValidationResult},
 };

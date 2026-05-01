@@ -10,15 +10,21 @@ default-members = [
   "crates/canvas",
   "crates/channels",
   "crates/chat",
-  "crates/code-index",
+  "crates/claude-import",
   "crates/cli",
+  "crates/code-index",
+  "crates/codex-import",
   "crates/common",
   "crates/config",
   "crates/cron",
+  "crates/ctl",
   "crates/discord",
   "crates/gateway",
   "crates/graphql",
+  "crates/hermes-import",
+  "crates/home-assistant",
   "crates/httpd",
+  "crates/import-core",
   "crates/matrix",
   "crates/mcp",
   "crates/mcp-agent-bridge",
@@ -42,6 +48,7 @@ default-members = [
   "crates/secret-store",
   "crates/service-traits",
   "crates/sessions",
+  "crates/signal",
   "crates/skills",
   "crates/slack",
   "crates/swift-bridge",
@@ -70,14 +77,20 @@ members = [
   "crates/canvas",
   "crates/channels",
   "crates/chat",
-  "crates/code-index",
+  "crates/claude-import",
   "crates/cli",
+  "crates/code-index",
+  "crates/codex-import",
   "crates/common",
   "crates/config",
   "crates/cron",
+  "crates/ctl",
   "crates/gateway",
   "crates/graphql",
+  "crates/hermes-import",
+  "crates/home-assistant",
   "crates/httpd",
+  "crates/import-core",
   "crates/matrix",
   "crates/mcp",
   "crates/media",
@@ -100,8 +113,10 @@ members = [
   "crates/secret-store",
   "crates/service-traits",
   "crates/sessions",
+  "crates/signal",
   "crates/skills",
   "crates/slack",
+  "crates/splitter",
   "crates/swift-bridge",
   "crates/tailscale",
   "crates/telegram",
@@ -181,6 +196,7 @@ async-trait  = "0.1"
 directories  = "6"
 dotenvy      = "0.15"
 futures      = "0.3"
+futures-util = "0.3"
 once_cell    = "1"
 tokio-stream = "0.1"
 tokio-test   = "0.4"
@@ -190,6 +206,7 @@ serde_yaml        = "0.9"
 tokio-tungstenite = "0.26"
 toml              = "0.8"
 toml_edit         = "0.22"
+zip               = { default-features = false, features = ["deflate"], version = "2" }
 # LLM provider crates (optional, behind feature flags)
 async-openai    = { features = ["chat-completion"], version = "0.32" }
 base64          = "0.22"
@@ -312,6 +329,7 @@ walkdir               = "2"
 wasmtime              = { features = ["component-model"], version = "36" }
 wasmtime-wasi         = "36"
 which                 = "8"
+wiremock              = "0.6"
 wit-bindgen           = "0.41"
 wit-bindgen-rt        = { features = ["bitflags"], version = "0.41" }
 # CalDAV / iCalendar
@@ -331,14 +349,19 @@ moltis-caldav           = { path = "crates/caldav" }
 moltis-canvas           = { path = "crates/canvas" }
 moltis-channels         = { path = "crates/channels" }
 moltis-chat             = { path = "crates/chat" }
-moltis-code-index      = { path = "crates/code-index" }
+moltis-claude-import    = { path = "crates/claude-import" }
+moltis-code-index       = { path = "crates/code-index" }
+moltis-codex-import     = { path = "crates/codex-import" }
 moltis-common           = { path = "crates/common" }
 moltis-config           = { path = "crates/config" }
 moltis-cron             = { path = "crates/cron" }
 moltis-discord          = { path = "crates/discord" }
 moltis-gateway          = { default-features = false, path = "crates/gateway" }
 moltis-graphql          = { path = "crates/graphql" }
+moltis-hermes-import    = { path = "crates/hermes-import" }
+moltis-home-assistant   = { path = "crates/home-assistant" }
 moltis-httpd            = { default-features = false, path = "crates/httpd" }
+moltis-import-core      = { path = "crates/import-core" }
 moltis-matrix           = { path = "crates/matrix" }
 moltis-mcp              = { path = "crates/mcp" }
 moltis-mcp-agent-bridge = { path = "crates/mcp-agent-bridge" }
@@ -363,8 +386,10 @@ moltis-schema-export    = { path = "crates/schema-export" }
 moltis-secret-store     = { default-features = false, path = "crates/secret-store" }
 moltis-service-traits   = { path = "crates/service-traits" }
 moltis-sessions         = { path = "crates/sessions" }
+moltis-signal           = { path = "crates/signal" }
 moltis-skills           = { path = "crates/skills" }
 moltis-slack            = { path = "crates/slack" }
+moltis-splitter         = { path = "crates/splitter" }
 moltis-swift-bridge     = { path = "crates/swift-bridge" }
 moltis-tailscale        = { path = "crates/tailscale" }
 moltis-telegram         = { path = "crates/telegram" }

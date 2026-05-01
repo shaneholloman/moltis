@@ -5,9 +5,12 @@ use std::{path::Path, sync::Arc};
 use {
     async_trait::async_trait,
     moltis_agents::tool_registry::AgentTool,
-    moltis_skills::{discover::SkillDiscoverer, types::SkillSource},
+    moltis_skills::{discover::SkillDiscoverer, types::SkillSource, usage::SkillUsageStore},
     serde_json::{Value, json},
 };
+
+#[cfg(feature = "metrics")]
+use moltis_metrics::{counter, labels, skills as skills_metrics};
 
 use {
     super::{
@@ -30,6 +33,7 @@ const SIDECAR_SUBDIRS: &[&str] = moltis_skills::SIDECAR_SUBDIRS;
 /// filesystem MCP server to load `SKILL.md` by absolute path.
 pub struct ReadSkillTool {
     discoverer: Arc<dyn SkillDiscoverer>,
+    usage_store: Option<SkillUsageStore>,
     #[cfg(feature = "bundled-skills")]
     bundled_store: Option<Arc<moltis_skills::bundled::BundledSkillStore>>,
 }
@@ -40,6 +44,7 @@ impl ReadSkillTool {
     pub fn new(discoverer: Arc<dyn SkillDiscoverer>) -> Self {
         Self {
             discoverer,
+            usage_store: None,
             #[cfg(feature = "bundled-skills")]
             bundled_store: None,
         }
@@ -54,8 +59,16 @@ impl ReadSkillTool {
     ) -> Self {
         Self {
             discoverer,
+            usage_store: None,
             bundled_store: Some(bundled_store),
         }
+    }
+
+    /// Attach a usage telemetry store.
+    #[must_use]
+    pub fn with_usage_store(mut self, store: SkillUsageStore) -> Self {
+        self.usage_store = Some(store);
+        self
     }
 
     /// Convenience constructor that uses default filesystem paths.
@@ -65,6 +78,7 @@ impl ReadSkillTool {
         let discoverer = Arc::new(FsSkillDiscoverer::new(FsSkillDiscoverer::default_paths()));
         Self {
             discoverer,
+            usage_store: None,
             #[cfg(feature = "bundled-skills")]
             bundled_store: None,
         }
@@ -168,6 +182,15 @@ impl AgentTool for ReadSkillTool {
 
         let mut result = read_primary(name, meta).await?;
         inject_install_note(&mut result, &install_note);
+
+        // Record activation (primary reads only, not sidecar reads).
+        if let Some(ref store) = self.usage_store {
+            store.record_read(name).await;
+        }
+        #[cfg(feature = "metrics")]
+        counter!(skills_metrics::ACTIVATIONS_TOTAL, labels::TOOL => "read_skill".to_string())
+            .increment(1);
+
         Ok(result)
     }
 }
@@ -578,6 +601,9 @@ fn read_bundled(
         .map(|(path, bytes)| json!({"path": path, "bytes": bytes}))
         .collect();
 
+    // Materialize sidecar files to disk so scripts can be executed.
+    let skill_dir = store.materialize_sidecars(name);
+
     let mut response = serde_json::Map::new();
     response.insert("name".into(), json!(name));
     response.insert("description".into(), json!(meta.description));
@@ -587,6 +613,9 @@ fn read_bundled(
     }
     response.insert("body".into(), json!(body));
     response.insert("bytes".into(), json!(body.len()));
+    if let Some(ref dir) = skill_dir {
+        response.insert("skill_dir".into(), json!(dir.display().to_string()));
+    }
 
     if let Some(display_name) = &meta.display_name {
         response.insert("display_name".into(), json!(display_name));
@@ -604,13 +633,22 @@ fn read_bundled(
         response.insert("allowed_tools".into(), json!(meta.allowed_tools));
     }
     if !linked.is_empty() {
-        response.insert(
-            "usage_hint".into(),
-            json!(
-                "To view a linked file, call read_skill again with file_path \
-                 set to one of the paths in linked_files."
-            ),
-        );
+        let has_scripts = skill_dir.is_some()
+            && linked.iter().any(|v| {
+                v.get("path")
+                    .and_then(|p| p.as_str())
+                    .is_some_and(|p| p.starts_with("scripts/"))
+            });
+        let hint = if has_scripts {
+            "This skill includes executable scripts. Use the `skill_dir` path \
+             to resolve script references in the body. To view a linked file, \
+             call read_skill again with file_path set to one of the paths in \
+             linked_files."
+        } else {
+            "To view a linked file, call read_skill again with file_path \
+             set to one of the paths in linked_files."
+        };
+        response.insert("usage_hint".into(), json!(hint));
     }
     response.insert("linked_files".into(), json!(linked));
 

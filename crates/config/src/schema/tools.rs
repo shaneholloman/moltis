@@ -39,7 +39,7 @@ pub struct ToolsConfig {
     /// Window size for the tool-call reflex-loop detector. When this many
     /// consecutive tool calls share the same tool + (args or error), the
     /// runner injects a directive intervention message. Set to 0 to disable.
-    /// Default 3.
+    /// Default 2.
     #[serde(default = "default_agent_loop_detector_window")]
     pub agent_loop_detector_window: usize,
     /// When the loop detector fires a second time (stage 2), strip the tool
@@ -224,7 +224,7 @@ fn default_max_tool_result_bytes() -> usize {
 }
 
 fn default_agent_loop_detector_window() -> usize {
-    3
+    2
 }
 
 fn default_agent_loop_detector_strip_tools() -> bool {
@@ -429,6 +429,12 @@ pub struct BrowserConfig {
     pub enabled: bool,
     /// Path to Chrome/Chromium binary (auto-detected if not set).
     pub chrome_path: Option<String>,
+    /// Path to the Obscura binary (auto-detected from PATH if not set).
+    /// Set `browser = "obscura"` in requests to use this lightweight headless browser.
+    pub obscura_path: Option<String>,
+    /// Path to the Lightpanda binary (auto-detected from PATH if not set).
+    /// Set `browser = "lightpanda"` in requests to use this lightweight headless browser.
+    pub lightpanda_path: Option<String>,
     /// Whether to run in headless mode.
     pub headless: bool,
     /// Default viewport width.
@@ -521,6 +527,8 @@ impl Default for BrowserConfig {
         Self {
             enabled: true,
             chrome_path: None,
+            obscura_path: None,
+            lightpanda_path: None,
             headless: true,
             viewport_width: 2560,
             viewport_height: 1440,
@@ -684,6 +692,11 @@ pub struct SandboxConfig {
     /// execution.
     pub backend: String,
     pub resource_limits: ResourceLimitsConfig,
+    /// GPU device passthrough for Docker/Podman backends.
+    /// Examples: "all", "device=0", "device=0,1".
+    /// Ignored for Apple Container and WASM backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<String>,
     /// Packages to install via `apt-get` in the sandbox image.
     /// Set to an empty list to skip provisioning.
     #[serde(default = "default_sandbox_packages")]
@@ -774,6 +787,7 @@ fn default_sandbox_packages() -> Vec<String> {
         "shellcheck",
         "patchelf",
         "git-lfs",
+        "gh", // GitHub CLI
         "gettext",
         "lsb-release",
         "software-properties-common",
@@ -891,6 +905,7 @@ impl Default for SandboxConfig {
             trusted_domains: Vec::new(),
             backend: "auto".into(),
             resource_limits: ResourceLimitsConfig::default(),
+            gpus: None,
             packages: default_sandbox_packages(),
             wasm_fuel_limit: None,
             wasm_epoch_interval_ms: None,

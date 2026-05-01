@@ -37,6 +37,7 @@ fields need updates in `check_semantic_warnings()`.
 - Use concrete types (`struct`/`enum`) over `serde_json::Value` wherever shape is known.
 - **Match on types, never strings.** Only convert to strings at serialization/display boundaries.
 - Prefer `From`/`Into`/`TryFrom`/`TryInto` over manual conversions. Ask before adding manual conversion paths.
+- **DRY cross-crate types:** When two crates need the same enum/struct, define it once in the lower-level crate and re-export via `pub type Alias = other_crate::Type` from the higher-level one. Never duplicate enums across crates or round-trip through strings (`parse(&id.to_string())`) to convert between mirror types.
 - Prefer streaming over non-streaming API calls.
 - Run independent async work concurrently (`tokio::join!`, `futures::join_all`).
 - Never use `block_on` inside async context.
@@ -68,14 +69,16 @@ cargo run / cargo run --release
 
 TypeScript/TSX source in `crates/web/ui/src/`, built with Vite to `crates/web/src/assets/dist/`.
 CSS and static assets in `crates/web/src/assets/`. Release mode embeds via `include_dir!`.
-Both `dist/` and `style.css` are committed (unminified) so `cargo build` works without Node.js
-and diffs merge cleanly. See `docs/src/frontend.md` for the full architecture guide.
+Generated assets (`dist/`, `css/style.css`, `style.css`, `sw.js`) are gitignored.
+Run `just build-web-assets` to generate them (requires Node.js).
+A `build.rs` check warns (debug) or fails (release/embedded-assets) if they are missing.
+See `docs/src/frontend.md` for the full architecture guide.
 
 ### Build Commands
 
 ```bash
 cd crates/web/ui
-npm run build          # Vite: TS/TSX → dist/ (MUST commit dist/ after)
+npm run build          # Vite: TS/TSX → dist/
 npm run build:css      # Tailwind: input.css → ../src/assets/css/style.css
 npm run build:sw       # esbuild: src/sw.ts → ../src/assets/sw.js
 npm run build:all      # All three above
@@ -87,7 +90,6 @@ npx tsc --noEmit       # Type check (strict, must be 0 errors)
 1. `biome check --write crates/web/ui/src/`
 2. `cd crates/web/ui && npm run build`
 3. `cd crates/web/ui && npx tsc --noEmit`
-4. Commit both the source changes AND the `dist/` output
 
 ### TypeScript Rules
 
@@ -194,9 +196,14 @@ Rules: use `getByRole()`/`getByText({ exact: true })` selectors, shared helpers
 (`navigateAndWait`, `waitForWsConnected`, `watchPageErrors`), assert no JS errors,
 avoid `waitForTimeout()`.
 
+**Flaky tests must be fixed, never skipped or ignored.** If a test fails intermittently,
+find and fix the root cause (race conditions, `requestAnimationFrame` timing, missing
+waits, element detachment from re-renders). Do not use `test.skip()`, `test.fixme()`,
+or retry-count workarounds to hide flakiness.
+
 ## Code Quality
 
-- Never run `cargo fmt` on stable in this repo. Always use the pinned nightly rustfmt (`just format`, `just format-check`, or `cargo +nightly-2025-11-30 fmt ...`).
+- Never run `cargo fmt` on stable in this repo. Always use the pinned nightly rustfmt (`just format`, `just format-check`, or `cargo fmt` — `rust-toolchain.toml` selects the right nightly automatically).
 
 ```bash
 just format              # Format Rust (pinned nightly)
@@ -314,14 +321,14 @@ Conventional commits: `feat|fix|docs|style|refactor|test|chore(scope): descripti
 
 For incremental local edits before full validation:
 - TS/TSX changed: run `biome check --write` and `cd crates/web/ui && npm run build`.
-- Rust changed: run `cargo +nightly-2025-11-30 fmt --all -- --check`.
+- Rust changed: run `cargo fmt --all -- --check`.
 - Both changed: run all three.
 
 Exact commands (must match `local-validate.sh`):
-- Fmt: `cargo +nightly-2025-11-30 fmt --all -- --check`
+- Fmt: `cargo fmt --all -- --check`
 - Clippy: `just lint` (OS-aware: on macOS excludes CUDA features, on Linux uses `--all-features`)
 - Tests: `just test` (OS-aware: on macOS uses nextest without CUDA features, on Linux uses `--all-features`)
-- macOS app (Darwin hosts): `./scripts/build-swift-bridge.sh && ./scripts/generate-swift-project.sh && ./scripts/lint-swift.sh && xcodebuild -project apps/macos/Moltis.xcodeproj -scheme Moltis -configuration Release -destination "platform=macOS" -derivedDataPath apps/macos/.derivedData-local-validate build`
+- macOS app (Darwin hosts): `./scripts/build-swift-bridge.sh && ./scripts/generate-swift-project.sh && ./scripts/lint-swift.sh && xcodebuild -project apps/macos/Moltis.xcodeproj -scheme Moltis -configuration Release -destination "platform=macOS" -derivedDataPath apps/macos/.derivedData-local-validate CODE_SIGNING_ALLOWED=NO build`
 - iOS app (Darwin hosts): `cargo run -p moltis-schema-export -- apps/ios/GraphQL/Schema/schema.graphqls && ./scripts/generate-ios-graphql.sh && ./scripts/generate-ios-project.sh && xcodebuild -project apps/ios/Moltis.xcodeproj -scheme Moltis -configuration Debug -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO build`
 
 ### PR Descriptions

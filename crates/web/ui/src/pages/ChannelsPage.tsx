@@ -19,10 +19,11 @@ import { sendRpc } from "../helpers";
 import { updateNavCount } from "../nav-counts";
 import { connected } from "../signals";
 import * as S from "../state";
-import { ConfirmDialog, requestConfirm, showToast } from "../ui";
+import { ConfirmDialog, copyToClipboard, requestConfirm, showToast } from "../ui";
 import { AddDiscordModal } from "./channels/modals/AddDiscordModal";
 import { AddMatrixModal } from "./channels/modals/AddMatrixModal";
 import { AddNostrModal } from "./channels/modals/AddNostrModal";
+import { AddSignalModal } from "./channels/modals/AddSignalModal";
 import { AddSlackModal } from "./channels/modals/AddSlackModal";
 import { AddTeamsModal } from "./channels/modals/AddTeamsModal";
 // ── Sub-module imports (modals + shared fields) ──────────────
@@ -105,6 +106,12 @@ export interface ChannelConfig {
 	secret_key?: string;
 	relays?: string[];
 	allowed_pubkeys?: string[];
+	// Signal
+	account?: string;
+	account_uuid?: string;
+	http_url?: string;
+	group_allowlist?: string[];
+	text_chunk_limit?: number;
 	// Advanced config patch pass-through
 	[key: string]: unknown;
 }
@@ -177,6 +184,7 @@ export const showAddWhatsApp: Signal<boolean> = signal(false);
 export const showAddSlack: Signal<boolean> = signal(false);
 export const showAddMatrix: Signal<boolean> = signal(false);
 export const showAddNostr: Signal<boolean> = signal(false);
+export const showAddSignal: Signal<boolean> = signal(false);
 export const editingChannel: Signal<Channel | null> = signal(null);
 const sendersAccount: Signal<string> = signal("");
 
@@ -200,6 +208,7 @@ export function channelLabel(type: string | undefined): string {
 	if (t === "slack") return "Slack";
 	if (t === "matrix") return "Matrix";
 	if (t === "nostr") return "Nostr";
+	if (t === "signal") return "Signal";
 	return "Telegram";
 }
 
@@ -255,12 +264,6 @@ function ChannelStorageNotice({ compact = false }: ChannelStorageNoticeProps): V
 			<span className="font-medium text-[var(--text-strong)]">Storage note.</span> {channelStorageNote()}
 		</div>
 	);
-}
-
-function copyToClipboard(value: unknown, successMessage: string): void {
-	const text = String(value || "").trim();
-	if (!text) return;
-	navigator.clipboard.writeText(text).then(() => showToast(successMessage));
 }
 
 // ── Matrix info row ──────────────────────────────────────────
@@ -685,6 +688,16 @@ function ConnectButtons(): VNode {
 					<span className="icon icon-nostr" /> Connect Nostr
 				</button>
 			)}
+			{offered.has("signal") && (
+				<button
+					className="provider-btn provider-btn-secondary inline-flex items-center gap-1.5"
+					onClick={() => {
+						if (connected.value) showAddSignal.value = true;
+					}}
+				>
+					<span className="icon icon-signal" /> Connect Signal
+				</button>
+			)}
 		</div>
 	);
 }
@@ -721,9 +734,7 @@ function renderSenderRow(s: SenderEntry, onAction: (identifier: string, action: 
 		<span
 			className="provider-item-badge cursor-pointer select-none"
 			style={{ background: "var(--warning-bg, #fef3c7)", color: "var(--warning-text, #92400e)" }}
-			onClick={() => {
-				navigator.clipboard.writeText(s.otp_pending?.code ?? "").then(() => showToast("OTP code copied"));
-			}}
+			onClick={() => copyToClipboard(s.otp_pending?.code ?? "", "OTP code copied")}
 		>
 			OTP: <code className="text-xs">{s.otp_pending.code}</code>
 		</span>
@@ -921,6 +932,7 @@ function ChannelsPageComponent(): VNode {
 			<AddSlackModal />
 			<AddMatrixModal />
 			<AddNostrModal />
+			<AddSignalModal />
 			<AddWhatsAppModal />
 			<EditChannelModal />
 			<ConfirmDialog />
@@ -942,6 +954,7 @@ export function initChannels(container: HTMLElement): void {
 	showAddSlack.value = false;
 	showAddMatrix.value = false;
 	showAddNostr.value = false;
+	showAddSignal.value = false;
 	showAddWhatsApp.value = false;
 	editingChannel.value = null;
 	sendersAccount.value = "";

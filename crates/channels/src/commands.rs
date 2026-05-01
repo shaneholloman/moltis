@@ -35,12 +35,20 @@ pub fn all_commands() -> &'static [CommandDef] {
             description: "Attach an existing session here",
         },
         CommandDef {
+            name: "fork",
+            description: "Fork this session into a new branch",
+        },
+        CommandDef {
             name: "clear",
             description: "Clear session history",
         },
         CommandDef {
             name: "compact",
             description: "Compact session (summarize)",
+        },
+        CommandDef {
+            name: "title",
+            description: "Auto-generate session title",
         },
         CommandDef {
             name: "context",
@@ -64,6 +72,10 @@ pub fn all_commands() -> &'static [CommandDef] {
             description: "Switch session agent",
         },
         CommandDef {
+            name: "mode",
+            description: "Switch session mode",
+        },
+        CommandDef {
             name: "model",
             description: "Switch provider/model",
         },
@@ -82,6 +94,35 @@ pub fn all_commands() -> &'static [CommandDef] {
         CommandDef {
             name: "peek",
             description: "Show current thinking/tool status",
+        },
+        CommandDef {
+            name: "update",
+            description: "Update moltis to latest or specified version",
+        },
+        CommandDef {
+            name: "rollback",
+            description: "List or restore file checkpoints",
+        },
+        // Quick actions
+        CommandDef {
+            name: "btw",
+            description: "Quick side question (no tools, not persisted)",
+        },
+        CommandDef {
+            name: "fast",
+            description: "Toggle fast/priority mode",
+        },
+        CommandDef {
+            name: "insights",
+            description: "Show session analytics and usage stats",
+        },
+        CommandDef {
+            name: "steer",
+            description: "Inject guidance into the current agent run",
+        },
+        CommandDef {
+            name: "queue",
+            description: "Queue a message for the next agent turn",
         },
         // Meta
         CommandDef {
@@ -181,8 +222,10 @@ mod tests {
         let names: Vec<&str> = all_commands().iter().map(|c| c.name).collect();
         for expected in [
             "new",
+            "fork",
             "clear",
             "compact",
+            "title",
             "context",
             "sessions",
             "attach",
@@ -190,11 +233,19 @@ mod tests {
             "approve",
             "deny",
             "agent",
+            "mode",
             "model",
             "sandbox",
             "sh",
             "stop",
             "peek",
+            "update",
+            "rollback",
+            "btw",
+            "fast",
+            "insights",
+            "steer",
+            "queue",
             "help",
         ] {
             assert!(

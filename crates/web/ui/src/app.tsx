@@ -22,6 +22,7 @@ import * as _channelsPage from "./pages/ChannelsPage";
 import { renderSessionProjectSelect } from "./project-combo";
 import { fetchProjects, renderProjectSelect } from "./projects";
 import * as _providers from "./providers";
+import { initModelLifecycleTracking } from "./providers";
 import { initPWA } from "./pwa";
 import { initInstallBanner } from "./pwa-install";
 import { mount, navigate, registerPage, sessionPath } from "./router";
@@ -30,6 +31,7 @@ import { updateSandboxImageUI, updateSandboxUI } from "./sandbox";
 import * as _sessions from "./sessions";
 import { fetchSessions, refreshWelcomeCardIfNeeded, removeSessionFromClientState, renderSessionList } from "./sessions";
 import * as S from "./state";
+import { togglePalette } from "./stores/command-store";
 import * as modelStore from "./stores/model-store";
 import * as _modelStore from "./stores/model-store";
 import * as _nodeStore from "./stores/node-store";
@@ -38,7 +40,7 @@ import * as _sessionHistoryCache from "./stores/session-history-cache";
 import * as _sessionStoreModule from "./stores/session-store";
 import { insertSessionInOrder, sessionStore } from "./stores/session-store";
 import { initTheme, injectMarkdownStyles } from "./theme";
-import { GlobalDialogs } from "./ui";
+import { GlobalDialogs, Toasts } from "./ui";
 import { connect } from "./websocket";
 import * as _wsConnect from "./ws-connect";
 
@@ -193,6 +195,7 @@ try {
 gon.onChange("update", showUpdateBanner as (v: unknown) => void);
 onEvent("update.available", showUpdateBanner as (payload: unknown) => void);
 initUpdateBannerDismiss();
+initUpdateNowButton();
 showVaultBanner(gon.get("vault_status") as string | null);
 gon.onChange("vault_status", showVaultBanner as (v: unknown) => void);
 
@@ -263,6 +266,12 @@ onEvent("tick", (_payload: unknown) => {
 	applyMemory(payload.mem as MemInfo | null);
 });
 
+// Command palette button — wire up click handler.
+const commandPaletteBtn = document.getElementById("commandPaletteBtn");
+if (commandPaletteBtn) {
+	commandPaletteBtn.addEventListener("click", () => togglePalette());
+}
+
 // Logout button — wire up click handler once.
 const logoutBtn = document.getElementById("logoutBtn");
 const settingsBtn = document.getElementById("settingsBtn");
@@ -302,7 +311,7 @@ if (logoutBtn) {
 if (settingsBtn) {
 	settingsBtn.addEventListener("click", () => {
 		closeMobileMenu();
-		navigate(routes.identity as string);
+		navigate(routes.profile as string);
 	});
 }
 if (mobileMenuBtn) {
@@ -317,7 +326,7 @@ if (mobileMenuOverlay) {
 if (mobileMenuSettingsBtn) {
 	mobileMenuSettingsBtn.addEventListener("click", () => {
 		closeMobileMenu();
-		navigate(routes.identity as string);
+		navigate(routes.profile as string);
 	});
 }
 if (mobileMenuSessionsBtn) {
@@ -336,6 +345,10 @@ window.addEventListener("resize", () => {
 });
 document.addEventListener("keydown", (e) => {
 	if (e.key === "Escape") closeMobileMenu();
+	if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+		e.preventDefault();
+		togglePalette();
+	}
 });
 document.addEventListener("click", (e) => {
 	if (!mobileMenuPanel?.classList.contains("open")) return;
@@ -490,6 +503,43 @@ function initUpdateBannerDismiss(): void {
 	});
 }
 
+function initUpdateNowButton(): void {
+	const btn = S.$<HTMLButtonElement>("updateNowBtn");
+	if (!btn || btn.dataset.bound === "1") return;
+	btn.dataset.bound = "1";
+	btn.addEventListener("click", async () => {
+		btn.textContent = "Updating\u2026";
+		btn.disabled = true;
+		try {
+			const resp = await fetch("/api/system/update", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({}),
+			});
+			const data = await resp.json();
+			if (data.restarting) {
+				btn.textContent = "Restarting\u2026";
+			} else if (data.status === "manual_required" && data.command) {
+				btn.textContent = "Manual update";
+				btn.disabled = false;
+				window.alert(`Run this command to update:\n\n${data.command}`);
+			} else if (data.status === "already_up_to_date") {
+				btn.textContent = "Up to date";
+			} else if (data.error) {
+				btn.textContent = "Update now";
+				btn.disabled = false;
+				window.alert(`Update failed: ${data.error}`);
+			} else {
+				btn.textContent = "Update now";
+				btn.disabled = false;
+			}
+		} catch {
+			btn.textContent = "Update now";
+			btn.disabled = false;
+		}
+	});
+}
+
 function showVaultBanner(status: string | null): void {
 	const el = document.getElementById("vaultBanner");
 	if (!el) return;
@@ -583,6 +633,10 @@ function fetchBootstrap(): void {
 				S.setProjects(bootProjects);
 				renderProjectSelect();
 				renderSessionProjectSelect();
+				// Show/hide project combo — matches fetchProjects() pattern
+				if (S.projectCombo) {
+					S.projectCombo.classList.toggle("hidden", bootProjects.length === 0);
+				}
 			}
 			S.setSandboxInfo(boot.sandbox || null);
 			// Re-apply sandbox UI now that we know the backend status.
@@ -644,6 +698,12 @@ function startApp(): void {
 	document.body.appendChild(dialogRoot);
 	render(<GlobalDialogs />, dialogRoot);
 
+	// Mount global toast notifications (used by showToast() from any page).
+	const toastRoot = document.createElement("div");
+	toastRoot.id = "preactToastRoot";
+	document.body.appendChild(toastRoot);
+	render(<Toasts />, toastRoot);
+
 	initSessionTabBar();
 	initArchivedSessionsToggle();
 
@@ -654,6 +714,7 @@ function startApp(): void {
 	}
 	mount(path);
 	connect();
+	initModelLifecycleTracking();
 	fetchBootstrap();
 	initInstallBanner();
 }

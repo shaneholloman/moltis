@@ -48,6 +48,8 @@ pub(super) fn build_schema_map() -> KnownKeys {
             ("strict_tools", Leaf),
             ("policy", tool_policy_entry()),
             ("model_overrides", Map(Box::new(model_override()))),
+            ("idle_timeout_secs", Leaf),
+            ("probe_timeout_secs", Leaf),
         ]))
     };
 
@@ -84,6 +86,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
             ("trusted_domains", Array(Box::new(Leaf))),
             ("backend", Leaf),
             ("resource_limits", resource_limits()),
+            ("gpus", Leaf),
             ("packages", Leaf),
             ("wasm_fuel_limit", Leaf),
             ("wasm_epoch_interval_ms", Leaf),
@@ -155,6 +158,8 @@ pub(super) fn build_schema_map() -> KnownKeys {
         Struct(HashMap::from([
             ("enabled", Leaf),
             ("chrome_path", Leaf),
+            ("obscura_path", Leaf),
+            ("lightpanda_path", Leaf),
             ("headless", Leaf),
             ("viewport_width", Leaf),
             ("viewport_height", Leaf),
@@ -313,6 +318,15 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 Struct(HashMap::from([("scope", Leaf), ("max_lines", Leaf)])),
             ),
             ("reasoning_effort", Leaf),
+            ("mcp", Struct(HashMap::from([("deny_servers", Leaf)]))),
+        ]))
+    };
+
+    let mode_preset = || {
+        Struct(HashMap::from([
+            ("name", Leaf),
+            ("description", Leaf),
+            ("prompt", Leaf),
         ]))
     };
 
@@ -342,6 +356,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
         (
             "chat",
             Struct(HashMap::from([
+                ("auto_title", Leaf),
                 ("message_queue_mode", Leaf),
                 ("prompt_memory_mode", Leaf),
                 ("workspace_file_max_chars", Leaf),
@@ -369,6 +384,10 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 ("default_preset", Leaf),
                 ("presets", Map(Box::new(agent_preset()))),
             ])),
+        ),
+        (
+            "modes",
+            Struct(HashMap::from([("presets", Map(Box::new(mode_preset())))])),
         ),
         ("tools", tools()),
         (
@@ -417,6 +436,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                     ("slack", Map(Box::new(channel_account()))),
                     ("matrix", Map(Box::new(channel_account()))),
                     ("nostr", Map(Box::new(channel_account()))),
+                    ("signal", Map(Box::new(channel_account()))),
                 ]),
             }
         }),
@@ -505,6 +525,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
             "failover",
             Struct(HashMap::from([
                 ("enabled", Leaf),
+                ("exact_model", Leaf),
                 ("fallback_models", Leaf),
             ])),
         ),
@@ -514,6 +535,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 ("enabled", Leaf),
                 ("every", Leaf),
                 ("model", Leaf),
+                ("agent_id", Leaf),
                 ("prompt", Leaf),
                 ("ack_max_chars", Leaf),
                 ("active_hours", active_hours()),
@@ -522,6 +544,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 ("to", Leaf),
                 ("sandbox_enabled", Leaf),
                 ("sandbox_image", Leaf),
+                ("wake_cooldown", Leaf),
             ])),
         ),
         (
@@ -553,6 +576,21 @@ pub(super) fn build_schema_map() -> KnownKeys {
             ])),
         ),
         (
+            "home_assistant",
+            Struct(HashMap::from([
+                ("enabled", Leaf),
+                ("default_instance", Leaf),
+                (
+                    "instances",
+                    Map(Box::new(Struct(HashMap::from([
+                        ("url", Leaf),
+                        ("token", Leaf),
+                        ("timeout_seconds", Leaf),
+                    ])))),
+                ),
+            ])),
+        ),
+        (
             "webhooks",
             Struct(HashMap::from([(
                 "rate_limit",
@@ -563,6 +601,25 @@ pub(super) fn build_schema_map() -> KnownKeys {
                     ("cleanup_interval_secs", Leaf),
                 ])),
             )])),
+        ),
+        (
+            "auxiliary",
+            Struct(HashMap::from([
+                ("compaction", Leaf),
+                ("title_generation", Leaf),
+                ("vision", Leaf),
+            ])),
+        ),
+        (
+            "code_index",
+            Struct(HashMap::from([
+                ("enabled", Leaf),
+                ("extensions", Array(Box::new(Leaf))),
+                ("max_file_size", Leaf),
+                ("skip_binary", Leaf),
+                ("skip_paths", Array(Box::new(Leaf))),
+                ("data_dir", Leaf),
+            ])),
         ),
         (
             "voice",
@@ -576,6 +633,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "elevenlabs",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("api_key", Leaf),
                                 ("voice_id", Leaf),
                                 ("model", Leaf),
@@ -584,6 +642,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "openai",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("api_key", Leaf),
                                 ("base_url", Leaf),
                                 ("voice", Leaf),
@@ -593,17 +652,23 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "google",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("api_key", Leaf),
                                 ("language_code", Leaf),
                                 ("voice", Leaf),
+                                ("model", Leaf),
                                 ("speaking_rate", Leaf),
                                 ("pitch", Leaf),
                             ])),
                         ),
-                        ("piper", Struct(HashMap::from([("model_path", Leaf)]))),
+                        (
+                            "piper",
+                            Struct(HashMap::from([("enabled", Leaf), ("model_path", Leaf)])),
+                        ),
                         (
                             "coqui",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("base_url", Leaf),
                                 ("voice_id", Leaf),
                                 ("endpoint", Leaf),
@@ -620,6 +685,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "whisper",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("api_key", Leaf),
                                 ("base_url", Leaf),
                                 ("model", Leaf),
@@ -629,6 +695,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "groq",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("api_key", Leaf),
                                 ("model", Leaf),
                                 ("language", Leaf),
@@ -637,6 +704,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "deepgram",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("api_key", Leaf),
                                 ("model", Leaf),
                                 ("language", Leaf),
@@ -645,11 +713,16 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         ),
                         (
                             "google",
-                            Struct(HashMap::from([("api_key", Leaf), ("language_code", Leaf)])),
+                            Struct(HashMap::from([
+                                ("enabled", Leaf),
+                                ("api_key", Leaf),
+                                ("language_code", Leaf),
+                            ])),
                         ),
                         (
                             "mistral",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("api_key", Leaf),
                                 ("model", Leaf),
                                 ("language", Leaf),
@@ -658,6 +731,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "elevenlabs",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("api_key", Leaf),
                                 ("model", Leaf),
                                 ("language", Leaf),
@@ -666,6 +740,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "voxtral_local",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("base_url", Leaf),
                                 ("model", Leaf),
                                 ("endpoint", Leaf),
@@ -674,6 +749,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "whisper_cli",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("binary_path", Leaf),
                                 ("model_path", Leaf),
                                 ("language", Leaf),
@@ -682,6 +758,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                         (
                             "sherpa_onnx",
                             Struct(HashMap::from([
+                                ("enabled", Leaf),
                                 ("model_dir", Leaf),
                                 ("language", Leaf),
                                 ("sample_rate", Leaf),

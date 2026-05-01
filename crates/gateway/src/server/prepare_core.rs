@@ -77,6 +77,8 @@ pub async fn prepare_gateway_core(
     let resolved_auth = auth::resolve_auth(token, password.clone());
 
     // Load config file (moltis.toml / .yaml / .json) if present.
+    // Note: initialize_config() is called once at CLI startup (main.rs)
+    // or by the swift-bridge before reaching here.
     let mut config = moltis_config::discover_and_load();
     info!(
         offered_channels = ?config.channels.offered,
@@ -110,6 +112,12 @@ pub async fn prepare_gateway_core(
         );
     }
     let base_provider_config = config.providers.clone();
+
+    // Migrate voice API keys from moltis.toml to the credential store on
+    // first run after upgrade.  This is idempotent — once keys are in the
+    // store the TOML entries are cleared and subsequent runs are a no-op.
+    #[cfg(feature = "voice")]
+    crate::voice::migrate_voice_keys_to_key_store(&config);
 
     // Merge any previously saved API keys into the provider config so they
     // survive gateway restarts without requiring env vars.
@@ -554,6 +562,13 @@ pub async fn prepare_gateway_core(
                         .set_project_id(&entry.key, entry.project_id.clone())
                         .await;
                 }
+                if entry.mode_id.is_some()
+                    && let Err(e) = sqlite_meta
+                        .set_mode_id(&entry.key, entry.mode_id.as_deref())
+                        .await
+                {
+                    tracing::warn!("failed to migrate session mode for {}: {e}", entry.key);
+                }
             }
         }
         let bak = metadata_json_path.with_extension("json.bak");
@@ -579,6 +594,18 @@ pub async fn prepare_gateway_core(
     ));
     if let Err(e) = agent_persona_store.ensure_main_workspace_seeded() {
         tracing::warn!(error = %e, "failed to seed main agent workspace");
+    }
+    if let Err(e) = agent_persona_store.ensure_main_row().await {
+        tracing::warn!(error = %e, "failed to ensure main agent DB row");
+    }
+
+    let voice_persona_store = Arc::new(crate::voice_persona::VoicePersonaStore::new(
+        db_pool.clone(),
+    ));
+    match voice_persona_store.seed_defaults().await {
+        Ok(0) => {},
+        Ok(n) => tracing::info!(count = n, "seeded default voice personas"),
+        Err(e) => tracing::warn!(error = %e, "failed to seed default voice personas"),
     }
 
     let deferred_state: Arc<tokio::sync::OnceCell<Arc<GatewayState>>> =
@@ -808,6 +835,21 @@ pub async fn prepare_gateway_core(
         window_ms: config.cron.rate_limit_window_secs * 1000,
     };
 
+    let default_cooldown_ms = moltis_cron::service::DEFAULT_WAKE_COOLDOWN_MS;
+    let wake_cooldown_ms =
+        match moltis_cron::parse::parse_duration_ms(&config.heartbeat.wake_cooldown) {
+            Ok(ms) => ms,
+            Err(e) => {
+                tracing::warn!(
+                    raw = %config.heartbeat.wake_cooldown,
+                    error = %e,
+                    fallback_ms = default_cooldown_ms,
+                    "invalid [heartbeat].wake_cooldown, using default"
+                );
+                default_cooldown_ms
+            },
+        };
+
     let cron_store_for_pruning = Arc::clone(&cron_store);
     let cron_service = moltis_cron::service::CronService::with_events_queue(
         cron_store,
@@ -815,6 +857,7 @@ pub async fn prepare_gateway_core(
         on_agent_turn,
         Some(on_cron_notify),
         rate_limit_config,
+        wake_cooldown_ms,
         events_queue,
     );
 
@@ -948,7 +991,10 @@ pub async fn prepare_gateway_core(
                     broadcast(
                         state,
                         "sandbox.image.build",
-                        serde_json::json!({ "phase": "start", "packages": packages }),
+                        serde_json::json!({
+                            "phase": "start",
+                            "package_count": packages.len(),
+                        }),
                         BroadcastOpts {
                             drop_if_slow: true,
                             ..Default::default()
@@ -966,6 +1012,7 @@ pub async fn prepare_gateway_core(
                         );
                         router.set_global_image(Some(result.tag.clone())).await;
                         build_router.building_flag.store(false, Ordering::Relaxed);
+                        build_router.build_complete.notify_waiters();
 
                         if let Some(state) = deferred_for_build.get() {
                             broadcast(
@@ -989,10 +1036,12 @@ pub async fn prepare_gateway_core(
                             "sandbox image pre-build: no-op (no packages or unsupported backend)"
                         );
                         build_router.building_flag.store(false, Ordering::Relaxed);
+                        build_router.build_complete.notify_waiters();
                     },
                     Err(e) => {
                         tracing::warn!("sandbox image pre-build failed: {e}");
                         build_router.building_flag.store(false, Ordering::Relaxed);
+                        build_router.build_complete.notify_waiters();
                         if let Some(state) = deferred_for_build.get() {
                             broadcast(
                                 state,
@@ -1266,6 +1315,7 @@ pub async fn prepare_gateway_core(
     )
     .await;
     services = channel_result.services;
+    #[cfg(feature = "msteams")]
     let msteams_webhook_plugin = channel_result.msteams_webhook_plugin;
     #[cfg(feature = "slack")]
     let slack_webhook_plugin = channel_result.slack_webhook_plugin;
@@ -1274,6 +1324,7 @@ pub async fn prepare_gateway_core(
     services = services.with_session_store(Arc::clone(&session_store));
     services = services.with_session_share_store(Arc::clone(&session_share_store));
     services = services.with_agent_persona_store(Arc::clone(&agent_persona_store));
+    services = services.with_voice_persona_store(Arc::clone(&voice_persona_store));
     startup_mem_probe.checkpoint("channels.initialized");
 
     let agents_config = Arc::new(tokio::sync::RwLock::new(config.agents.clone()));
@@ -1318,6 +1369,7 @@ pub async fn prepare_gateway_core(
                 .with_share_store(Arc::clone(&session_share_store))
                 .with_sandbox_router(Arc::clone(&sandbox_router))
                 .with_agent_persona_store(Arc::clone(&agent_persona_store))
+                .with_voice_persona_store(Arc::clone(&voice_persona_store))
                 .with_project_store(Arc::clone(&project_store))
                 .with_state_store(Arc::clone(&session_state_store))
                 .with_browser_service(Arc::clone(&services.browser));
@@ -1343,7 +1395,7 @@ pub async fn prepare_gateway_core(
     startup_mem_probe.checkpoint("memory_manager.initialized");
 
     // ── Code index initialization ──────────────────────────────────────
-    let code_index = init_code_index::init_code_index(&data_dir).await;
+    let code_index = init_code_index::init_code_index(&data_dir, &config).await;
     startup_mem_probe.checkpoint("code_index.initialized");
 
     post_state::complete_startup(post_state::PostStateInputs {
@@ -1384,6 +1436,7 @@ pub async fn prepare_gateway_core(
         discovered_hooks_info,
         persisted_disabled,
         agents_config,
+        #[cfg(feature = "msteams")]
         msteams_webhook_plugin,
         #[cfg(feature = "slack")]
         slack_webhook_plugin,
@@ -1400,6 +1453,8 @@ pub async fn prepare_gateway_core(
         #[cfg(feature = "tailscale")]
         tailscale_reset_on_exit_override,
         code_index,
+        #[cfg(any(feature = "qmd", feature = "code-index-builtin"))]
+        project_store: Arc::clone(&project_store),
     })
     .await
 }

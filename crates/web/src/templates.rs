@@ -23,7 +23,7 @@ pub(crate) struct SpaRoutes {
     settings: &'static str,
     providers: &'static str,
     security: &'static str,
-    identity: &'static str,
+    profile: &'static str,
     config: &'static str,
     logs: &'static str,
     nodes: &'static str,
@@ -40,7 +40,7 @@ pub(crate) static SPA_ROUTES: SpaRoutes = SpaRoutes {
     settings: "/settings",
     providers: "/settings/providers",
     security: "/settings/security",
-    identity: "/settings/identity",
+    profile: "/settings/profile",
     config: "/settings/config",
     logs: "/settings/logs",
     nodes: "/settings/nodes",
@@ -67,6 +67,8 @@ pub(crate) struct GonData {
     heartbeat_config: moltis_config::schema::HeartbeatConfig,
     heartbeat_runs: Vec<moltis_cron::types::CronRunRecord>,
     voice_enabled: bool,
+    stt_enabled: bool,
+    tts_enabled: bool,
     graphql_enabled: bool,
     terminal_enabled: bool,
     git_branch: Option<String>,
@@ -82,6 +84,12 @@ pub(crate) struct GonData {
     started_at: u64,
     /// Whether an OpenClaw installation was detected (for import UI).
     openclaw_detected: bool,
+    /// Whether a Claude Code/Desktop installation was detected (for import UI).
+    claude_detected: bool,
+    /// Whether a Codex CLI installation was detected (for import UI).
+    codex_detected: bool,
+    /// Whether a Hermes installation was detected (for import UI).
+    hermes_detected: bool,
     /// Small recent session snapshot for instant sidebar paint.
     sessions_recent: Vec<serde_json::Value>,
     agents: Vec<serde_json::Value>,
@@ -470,6 +478,8 @@ pub(crate) async fn build_gon_data(gw: &GatewayState) -> GonData {
         heartbeat_config,
         heartbeat_runs,
         voice_enabled: cfg!(feature = "voice"),
+        stt_enabled: cfg!(feature = "voice") && gw.config.voice.stt.enabled,
+        tts_enabled: cfg!(feature = "voice") && gw.config.voice.tts.enabled,
         graphql_enabled: cfg!(feature = "graphql"),
         terminal_enabled: gw.config.server.is_terminal_enabled(),
         git_branch: detect_git_branch(),
@@ -486,6 +496,9 @@ pub(crate) async fn build_gon_data(gw: &GatewayState) -> GonData {
         routes: SPA_ROUTES.clone(),
         started_at: *PROCESS_STARTED_AT_MS,
         openclaw_detected: moltis_gateway::server::openclaw_detected_for_ui(),
+        claude_detected: moltis_gateway::server::claude_detected_for_ui(),
+        codex_detected: moltis_gateway::server::codex_detected_for_ui(),
+        hermes_detected: moltis_gateway::server::hermes_detected_for_ui(),
         sessions_recent,
         agents,
         webhooks,
@@ -887,7 +900,7 @@ pub(crate) async fn render_spa_template(
         "default-src 'self'; \
          script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; \
          style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data: blob:; \
+         img-src 'self' data: blob: https://github.com https://avatars.githubusercontent.com https://clawhub.ai; \
          media-src 'self' blob:; \
          font-src 'self'; \
          connect-src 'self' ws: wss:; \

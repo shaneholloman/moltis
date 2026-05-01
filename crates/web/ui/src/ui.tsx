@@ -4,6 +4,7 @@ import type { Signal } from "@preact/signals";
 import { signal } from "@preact/signals";
 import type { ComponentChildren, VNode } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
+import { CommandPalette } from "./components/CommandPalette";
 import { t } from "./i18n";
 
 // ── Toast notifications ──────────────────────────────────────
@@ -23,6 +24,45 @@ export function showToast(message: string, type: string = "info"): void {
 	setTimeout(() => {
 		toasts.value = toasts.value.filter((toast) => toast.id !== id);
 	}, 4000);
+}
+
+export async function copyToClipboard(
+	text: string,
+	successMessage = "Copied to clipboard",
+	failMessage = "Could not copy — please copy manually.",
+): Promise<boolean> {
+	const onSuccess = () => {
+		if (successMessage) showToast(successMessage, "success");
+		return true;
+	};
+	const onFail = () => {
+		if (failMessage) showToast(failMessage, "error");
+		return false;
+	};
+	if (navigator.clipboard) {
+		try {
+			await navigator.clipboard.writeText(text);
+			return onSuccess();
+		} catch {
+			// fall through to execCommand fallback
+		}
+	}
+	try {
+		const el = document.createElement("textarea");
+		el.value = text;
+		el.style.position = "fixed";
+		el.style.opacity = "0";
+		document.body.appendChild(el);
+		try {
+			el.select();
+			const ok = document.execCommand("copy");
+			return ok ? onSuccess() : onFail();
+		} finally {
+			document.body.removeChild(el);
+		}
+	} catch {
+		return onFail();
+	}
 }
 
 export function Toasts(): VNode {
@@ -386,6 +426,7 @@ export function GlobalDialogs(): VNode {
 			<VanillaConfirmDialog />
 			<ShareVisibilityDialog />
 			<ShareLinkDialog />
+			<CommandPalette />
 		</>
 	);
 }

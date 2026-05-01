@@ -72,6 +72,12 @@
     <span class="icon icon-md icon-burger-mobile"></span>
   </button>
 
+  <button id="commandPaletteBtn" class="header-link-btn" title="Command palette">
+    <span class="icon icon-search"></span>
+    <kbd class="cmd-palette-header-kbd" id="cmdPaletteKbd"></kbd>
+  </button>
+  <script nonce="{{ nonce }}">!function(){var k=document.getElementById("cmdPaletteKbd");if(k)k.textContent=/Mac|iPhone|iPad/.test(navigator.userAgent)?"\u2318K":"Ctrl+K"}()</script>
+
   <div class="header-actions">
     <button id="settingsBtn" class="header-link-btn" title="Settings">
       <span class="icon icon-settings"></span>
@@ -159,8 +165,15 @@
     An update is available
     <strong id="updateLatestVersion"></strong>
   </span>
+  <button id="updateNowBtn" type="button" class="auth-disabled-setup">Update now</button>
   <a id="updateReleaseLink" href="https://github.com/moltis-org/moltis/releases/latest" target="_blank" rel="noopener noreferrer" class="auth-disabled-setup">View release</a>
   <button id="updateDismissBtn" type="button" class="auth-disabled-setup bg-transparent border-0 p-0 cursor-pointer">Dismiss</button>
+</div>
+
+<!-- Vault sealed banner (shown when vault is locked after restart) -->
+<div id="vaultBanner" class="info-banner" style="display:none">
+  <span>Your encryption vault is locked — API keys are unavailable until unlocked.</span>
+  <a href="{{ routes.settings }}/vault" class="auth-disabled-setup">Unlock vault</a>
 </div>
 
 <!-- PWA Install Banner (shown on mobile when not installed) -->
@@ -195,11 +208,11 @@
         </div>
       </div>
     </div>
-    <div class="h-12 px-3 border-b border-[var(--border)] relative flex items-center">
+    <div class="px-3 py-1.5 border-b border-[var(--border)] relative flex items-center">
       <div class="w-full flex items-center gap-1">
         <input id="sessionSearch" type="text" placeholder="Search sessions…"
-               class="flex-1 min-w-0 text-xs bg-[var(--surface2)] border border-[var(--border)] rounded px-2 py-1.5 text-[var(--text)] focus:outline-none focus:border-[var(--border-strong)] font-sans" />
-        <button id="newSessionBtn" class="text-xs text-[var(--muted)] border border-[var(--border)] px-2 py-1.5 rounded hover:text-[var(--text)] hover:border-[var(--border-strong)] transition-colors cursor-pointer bg-transparent" title="New session">+</button>
+               class="flex-1 min-w-0 text-xs bg-[var(--surface2)] border border-[var(--border)] rounded px-2 py-1 text-[var(--text)] focus:outline-none focus:border-[var(--border-strong)] font-sans" />
+        <button id="newSessionBtn" class="text-xs text-[var(--muted)] border border-[var(--border)] px-2 py-1 rounded hover:text-[var(--text)] hover:border-[var(--border-strong)] transition-colors cursor-pointer bg-transparent" title="New session">+</button>
       </div>
       <div id="searchResults" class="hidden"></div>
     </div>

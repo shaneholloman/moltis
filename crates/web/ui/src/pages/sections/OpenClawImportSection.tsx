@@ -13,6 +13,7 @@ interface ScanResult {
 	home_dir?: string;
 	telegram_accounts?: number;
 	discord_accounts?: number;
+	signal_accounts?: number;
 	unsupported_channels?: string[];
 	identity_available?: boolean;
 	providers_available?: boolean;
@@ -126,9 +127,11 @@ export function OpenClawImportSection(): VNode {
 
 	const telegramAccounts = Number(scan.telegram_accounts) || 0;
 	const discordAccounts = Number(scan.discord_accounts) || 0;
+	const signalAccounts = Number(scan.signal_accounts) || 0;
 	const channelParts: string[] = [];
 	if (telegramAccounts > 0) channelParts.push(`${telegramAccounts} Telegram account(s)`);
 	if (discordAccounts > 0) channelParts.push(`${discordAccounts} Discord account(s)`);
+	if (signalAccounts > 0) channelParts.push(`${signalAccounts} Signal account(s)`);
 	const channelDetail = channelParts.length > 0 ? channelParts.join(", ") : null;
 	const unsupportedChannels = (scan.unsupported_channels || []).filter(
 		(channel) => String(channel).toLowerCase() !== ChannelType.Discord,
@@ -170,8 +173,8 @@ export function OpenClawImportSection(): VNode {
 	const anySelected = categories.some((c) => c.available && selection[c.key]);
 
 	return (
-		<div className="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-			<SectionHeading title="OpenClaw Import" />
+		<div>
+			<SectionHeading title="OpenClaw" />
 			<p className="text-xs text-[var(--muted)] leading-relaxed" style={{ maxWidth: "600px", margin: 0 }}>
 				Import data from your OpenClaw installation at <code className="text-[var(--text)]">{scan.home_dir}</code>. This
 				is a read-only copy {"\u2014"} your OpenClaw files will not be modified or removed. You can keep using both side

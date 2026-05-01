@@ -397,6 +397,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                             payload: Some(moltis_cron::types::CronPayload::AgentTurn {
                                 message: prompt,
                                 model: patch.model.clone(),
+                                agent_id: patch.agent_id.clone(),
                                 timeout_secs: None,
                                 deliver: patch.deliver,
                                 channel: patch.channel.clone(),
@@ -431,6 +432,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                             payload: moltis_cron::types::CronPayload::AgentTurn {
                                 message: prompt,
                                 model: patch.model.clone(),
+                                agent_id: patch.agent_id.clone(),
                                 timeout_secs: None,
                                 deliver: patch.deliver,
                                 channel: patch.channel.clone(),
@@ -633,6 +635,15 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         "chat.clear",
         Box::new(|ctx| {
             Box::pin(async move {
+                // Export the session before the clear destroys its history.
+                if let Some(session_key) = active_session_key_for_ctx(&ctx).await {
+                    let hooks = ctx.state.inner.read().await.hook_registry.clone();
+                    if let Some(ref hooks) = hooks {
+                        crate::session::dispatch_command_hook(hooks, &session_key, "reset", None)
+                            .await;
+                    }
+                }
+
                 let mut params = ctx.params.clone();
                 params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
                 ctx.state
@@ -831,6 +842,19 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 // Mark the session as seen so unread state clears.
                 ctx.state.services.session.mark_seen(key).await;
 
+                // Export the previous session when the user creates a brand-new
+                // session (e.g. "+" button or /new).  Switching between two
+                // *existing* sessions intentionally skips export — only new-
+                // session creation signals the end of the previous conversation.
+                if !was_existing_session
+                    && let Some(prev_key) = previous_active_key.as_deref().filter(|pk| *pk != key)
+                {
+                    let hooks = ctx.state.inner.read().await.hook_registry.clone();
+                    if let Some(ref hooks) = hooks {
+                        crate::session::dispatch_command_hook(hooks, prev_key, "new", None).await;
+                    }
+                }
+
                 if let Some(pid) = ctx.params.get("project_id").and_then(|v| v.as_str()) {
                     let _ = ctx
                         .state
@@ -973,12 +997,25 @@ pub(super) fn register(reg: &mut MethodRegistry) {
             "tts.status",
             Box::new(|ctx| {
                 Box::pin(async move {
-                    ctx.state
+                    let mut status = ctx
+                        .state
                         .services
                         .tts
                         .status()
                         .await
-                        .map_err(ErrorShape::from)
+                        .map_err(ErrorShape::from)?;
+
+                    // Enrich with active persona info.
+                    if let Some(ref store) = ctx.state.services.voice_persona_store
+                        && let Ok(Some(active)) = store.get_active().await
+                    {
+                        status["persona"] = serde_json::json!({
+                            "id": active.persona.id,
+                            "label": active.persona.label,
+                        });
+                    }
+
+                    Ok(status)
                 })
             }),
         );
@@ -1025,10 +1062,39 @@ pub(super) fn register(reg: &mut MethodRegistry) {
             "tts.convert",
             Box::new(|ctx| {
                 Box::pin(async move {
+                    let mut params = ctx.params.clone();
+
+                    // Resolve voice persona through the full chain:
+                    // explicit personaId → session agent's voice_persona_id → global active.
+                    if params.get("persona").is_none()
+                        && let Some(ref vp_store) = ctx.state.services.voice_persona_store
+                    {
+                        let explicit_id = params.get("personaId").and_then(|v| v.as_str());
+                        let session_key = params
+                            .get("_session_key")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+
+                        let persona = crate::voice_persona::resolve_persona(
+                            vp_store,
+                            ctx.state.services.agent_persona_store.as_deref(),
+                            explicit_id,
+                            session_key.as_deref(),
+                            ctx.state.services.session_metadata.as_deref(),
+                        )
+                        .await;
+
+                        if let Some(persona) = persona
+                            && let Ok(v) = serde_json::to_value(&persona)
+                        {
+                            params["persona"] = v;
+                        }
+                    }
+
                     ctx.state
                         .services
                         .tts
-                        .convert(ctx.params.clone())
+                        .convert(params)
                         .await
                         .map_err(ErrorShape::from)
                 })

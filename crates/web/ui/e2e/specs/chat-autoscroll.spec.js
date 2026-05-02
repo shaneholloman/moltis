@@ -1,9 +1,9 @@
 const { expect, test } = require("../base-test");
-const { navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
+const { createSession, navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 /**
- * Wait for the chat session to finish loading so injected DOM elements
- * aren't blown away by a late renderHistory() call.
+ * Wait for the chat session to finish loading AND WS subscribed so injected
+ * DOM elements aren't blown away by a late renderHistory() call or reconnect.
  */
 async function waitForSessionReady(page) {
 	await page.waitForFunction(
@@ -13,7 +13,7 @@ async function waitForSessionReady(page) {
 			var appUrl = new URL(appScript.src, window.location.origin);
 			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
 			var state = await import(`${prefix}js/state.js`);
-			return !(state.sessionSwitchInProgress || state.chatBatchLoading);
+			return state.subscribed && !(state.sessionSwitchInProgress || state.chatBatchLoading);
 		},
 		{ timeout: 10_000 },
 	);
@@ -32,25 +32,47 @@ async function getModulePrefix(page) {
 }
 
 /**
- * Populate the chat message box with enough tall messages to make it scrollable.
+ * Populate the chat with enough messages to make it scrollable.
+ * Uses the app's RPC system-event to inject real messages that survive
+ * re-renders (unlike raw DOM injection which gets wiped by renderHistory).
  */
 async function injectScrollableMessages(page, count) {
 	const prefix = await getModulePrefix(page);
+	// Inject all messages at once via a batch of system-events
 	await page.evaluate(
-		({ prefix, msgCount }) => {
-			var box = document.getElementById("messages");
-			if (!box) throw new Error("chatMsgBox not mounted");
+		async ({ pfx, msgCount }) => {
+			var helpers = await import(`${pfx}js/helpers.js`);
 			for (var i = 0; i < msgCount; i++) {
-				var el = document.createElement("div");
-				el.className = "msg assistant";
-				el.textContent = `Message ${i + 1}`;
-				el.style.minHeight = "80px";
-				box.appendChild(el);
+				await helpers.sendRpc("system-event", {
+					event: "chat",
+					payload: {
+						sessionKey: window.__moltis_state?.activeSessionKey || "main",
+						state: "final",
+						text: "M".repeat(200),
+						messageIndex: 900000 + i,
+						model: "test",
+						provider: "test",
+					},
+				});
 			}
-			box.scrollTop = box.scrollHeight;
 		},
-		{ prefix, msgCount: count },
+		{ pfx: prefix, msgCount: count },
 	);
+	// Wait for all messages to render and scroll to settle at bottom
+	await expect
+		.poll(() => page.locator("#messages .msg.assistant").count(), { timeout: 15_000 })
+		.toBeGreaterThanOrEqual(count);
+	// Scroll to bottom
+	await page.evaluate(() => {
+		var box = document.getElementById("messages");
+		if (box) box.scrollTop = box.scrollHeight;
+	});
+	await expect
+		.poll(async () => {
+			const s = await getScrollState(page);
+			return s.scrollHeight - s.scrollTop - s.clientHeight;
+		})
+		.toBeLessThan(60);
 }
 
 /**
@@ -65,10 +87,18 @@ async function getScrollState(page) {
 }
 
 test.describe("Smart auto-scroll", () => {
-	test.beforeEach(async ({ page }) => {
+	test.beforeEach(async ({ page }, testInfo) => {
+		testInfo.setTimeout(90_000);
 		await navigateAndWait(page, "/chats/main");
 		await waitForWsConnected(page);
 		await waitForSessionReady(page);
+		// Create a fresh session so no prior history can re-render and
+		// overwrite injected DOM elements during the test.
+		await createSession(page);
+		await waitForSessionReady(page);
+		// Extra settle time for CI — the session switch may trigger
+		// deferred renders that overwrite injected DOM.
+		await page.waitForTimeout(500);
 	});
 
 	test("new content indicator appears when scrolled up and new message arrives", async ({ page }) => {
@@ -230,10 +260,13 @@ test.describe("Smart auto-scroll", () => {
 			await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 		});
 
-		// Should still be at the bottom
-		const after = await getScrollState(page);
-		const distAfter = after.scrollHeight - after.scrollTop - after.clientHeight;
-		expect(distAfter).toBeLessThan(60);
+		// Wait for smooth scroll to finish, then verify at bottom
+		await expect
+			.poll(async () => {
+				const s = await getScrollState(page);
+				return s.scrollHeight - s.scrollTop - s.clientHeight;
+			})
+			.toBeLessThan(60);
 
 		// No "new messages" indicator should appear
 		const indicator = page.locator(".new-content-indicator");
@@ -250,23 +283,23 @@ test.describe("Smart auto-scroll", () => {
 		const before = await getScrollState(page);
 		expect(before.scrollHeight - before.scrollTop - before.clientHeight).toBeLessThan(60);
 
-		// Simulate streaming: add several messages in sequence while remaining at bottom
+		// Simulate streaming: add several messages one at a time (matching real WS
+		// event delivery where each chunk arrives in a separate event loop turn).
+		const prefix = await getModulePrefix(page);
 		for (let i = 0; i < 5; i++) {
 			await page.evaluate(
-				async ({ idx }) => {
-					var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-					var appUrl = new URL(appScript.src, window.location.origin);
-					var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-					var chatUi = await import(`${prefix}js/chat-ui.js`);
-					var el = chatUi.chatAddMsg("assistant", `Streaming chunk ${idx}`);
-					if (el) el.style.minHeight = "60px";
-					await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+				async ({ pfx, idx }) => {
+					var chatUi = await import(`${pfx}js/chat-ui.js`);
+					chatUi.chatAddMsg("assistant", `Streaming chunk ${idx}`);
 				},
-				{ idx: i },
+				{ pfx: prefix, idx: i },
 			);
+			// Let the rAF-based scroll from smartScrollToBottom complete
+			// before adding the next message.
+			await page.waitForTimeout(100);
 		}
 
-		// Wait for smooth scroll to finish, then verify at bottom
+		// Wait for final scroll to settle
 		await expect
 			.poll(async () => {
 				const s = await getScrollState(page);
@@ -308,10 +341,13 @@ test.describe("Smart auto-scroll", () => {
 			await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 		});
 
-		// Should be scrolled to bottom — no indicator
-		const after = await getScrollState(page);
-		const distAfter = after.scrollHeight - after.scrollTop - after.clientHeight;
-		expect(distAfter).toBeLessThan(60);
+		// Wait for smooth scroll to finish, then verify at bottom
+		await expect
+			.poll(async () => {
+				const s = await getScrollState(page);
+				return s.scrollHeight - s.scrollTop - s.clientHeight;
+			})
+			.toBeLessThan(60);
 
 		const indicator = page.locator(".new-content-indicator");
 		await expect(indicator).toHaveCount(0);
@@ -429,9 +465,13 @@ test.describe("Smart auto-scroll", () => {
 			await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 		});
 
-		// Should be at the bottom
-		const after = await getScrollState(page);
-		expect(after.scrollHeight - after.scrollTop - after.clientHeight).toBeLessThan(60);
+		// Wait for smooth scroll to finish, then verify at bottom
+		await expect
+			.poll(async () => {
+				const s = await getScrollState(page);
+				return s.scrollHeight - s.scrollTop - s.clientHeight;
+			})
+			.toBeLessThan(60);
 
 		// No indicator
 		const indicator = page.locator(".new-content-indicator");
@@ -470,10 +510,13 @@ test.describe("Smart auto-scroll", () => {
 			await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 		});
 
-		// Should have scrolled to bottom automatically
-		const afterMsg = await getScrollState(page);
-		const distanceFromBottom = afterMsg.scrollHeight - afterMsg.scrollTop - afterMsg.clientHeight;
-		expect(distanceFromBottom).toBeLessThan(60);
+		// Wait for smooth scroll to finish, then verify at bottom
+		await expect
+			.poll(async () => {
+				const s = await getScrollState(page);
+				return s.scrollHeight - s.scrollTop - s.clientHeight;
+			})
+			.toBeLessThan(60);
 
 		// No indicator should appear in "always" mode
 		const indicator = page.locator(".new-content-indicator");

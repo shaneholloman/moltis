@@ -88,20 +88,93 @@ function isRetryableNavigationError(error) {
 async function navigateAndWait(page, path) {
 	const pageErrors = watchPageErrors(page);
 	let lastError = null;
-	for (let attempt = 0; attempt < 5; attempt++) {
+	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
-			await page.goto(path, { waitUntil: "domcontentloaded", timeout: 15_000 });
+			// Navigate to about:blank first to release any pending connections
+			// from previous navigations (HTTP/1.1 has a 6-connection-per-host limit).
+			if (attempt > 0) {
+				await page.goto("about:blank").catch(() => {});
+			}
+			await page.goto(path, { waitUntil: "domcontentloaded", timeout: 20_000 });
 			await expectPageContentMounted(page);
 			return pageErrors;
 		} catch (error) {
 			lastError = error;
-			if (!isRetryableNavigationError(error) || attempt === 4) {
+			if (!isRetryableNavigationError(error) || attempt === 2) {
+				// Capture diagnostic info when navigation fails
+				try {
+					var testInfo = require("@playwright/test").test.info();
+					var responses = [];
+					var consoleMessages = [];
+					page.on("response", (r) => responses.push(`${r.status()} ${r.url()}`));
+					page.on("console", (m) => consoleMessages.push(`[${m.type()}] ${m.text()}`));
+					// Try one more goto with a short timeout to capture what happens
+					await page.goto(path, { waitUntil: "commit", timeout: 5_000 }).catch(() => {});
+					// Check server health to see if it's alive
+					var healthOk = "unknown";
+					try {
+						var baseURL = testInfo.project.use?.baseURL || "http://127.0.0.1";
+						// Use http module directly — page.request dies when test timeout kills the context
+						var http = require("node:http");
+						healthOk = await new Promise((resolve) => {
+							var req = http.get(`${baseURL}/health`, { timeout: 3000 }, (res) => {
+								var body = "";
+								res.on("data", (d) => (body += d));
+								res.on("end", () => resolve(`${res.statusCode} ${body.slice(0, 200)}`));
+							});
+							req.on("error", (e) => resolve(`error: ${e.message}`));
+							req.on("timeout", () => {
+								req.destroy();
+								resolve("timeout");
+							});
+						});
+					} catch (he) {
+						healthOk = `error: ${he.message?.slice(0, 100)}`;
+					}
+					// Also try fetching the SPA page directly to see if server responds
+					var pageHttpOk = "unknown";
+					try {
+						pageHttpOk = await new Promise((resolve) => {
+							var req = http.get(`${baseURL}${path}`, { timeout: 3000 }, (res) => {
+								resolve(`${res.statusCode} content-length=${res.headers["content-length"] || "?"}`);
+								res.resume();
+							});
+							req.on("error", (e) => resolve(`error: ${e.message}`));
+							req.on("timeout", () => {
+								req.destroy();
+								resolve("timeout");
+							});
+						});
+					} catch (pe) {
+						pageHttpOk = `exception: ${pe.message?.slice(0, 100)}`;
+					}
+					var diag = [
+						`navigateAndWait failed for ${path} after ${attempt + 1} attempts`,
+						`page.url(): ${page.url()}`,
+						`health: ${healthOk}`,
+						`page-http: ${pageHttpOk}`,
+						`responses: ${JSON.stringify(responses.slice(0, 5))}`,
+						`console: ${JSON.stringify(consoleMessages.slice(0, 10))}`,
+						`error: ${error.message?.slice(0, 200)}`,
+					].join("\n");
+					if (testInfo) {
+						await testInfo.attach("navigation-debug", {
+							body: Buffer.from(diag, "utf-8"),
+							contentType: "text/plain",
+						});
+						var screenshot = await page.screenshot({ fullPage: true }).catch(() => null);
+						if (screenshot) {
+							await testInfo.attach("navigation-failure-screenshot", {
+								body: screenshot,
+								contentType: "image/png",
+							});
+						}
+					}
+				} catch {
+					// diagnostic collection failed
+				}
 				break;
 			}
-			// On CI the WebSocket may fail to connect after many tests,
-			// leaving the SPA unable to render content.  A reload often
-			// re-establishes the connection.
-			await page.reload({ waitUntil: "domcontentloaded", timeout: 10_000 }).catch(() => {});
 		}
 	}
 	if (lastError) throw lastError;

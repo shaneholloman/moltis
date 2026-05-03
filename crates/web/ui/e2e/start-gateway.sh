@@ -40,6 +40,8 @@ cd "${REPO_ROOT}"
 export MOLTIS_CONFIG_DIR="${CONFIG_DIR}"
 export MOLTIS_DATA_DIR="${DATA_DIR}"
 export MOLTIS_SERVER__PORT="${PORT}"
+# Enable debug logging for gon/template tracing to diagnose page-render deadlocks.
+export RUST_LOG="${RUST_LOG:-moltis_web::templates=debug,info}"
 
 binary_is_stale() {
 	local binary="$1"

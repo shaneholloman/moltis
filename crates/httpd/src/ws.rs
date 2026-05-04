@@ -394,7 +394,7 @@ pub async fn handle_connection(
         connect_params: resolved_params,
         sender: client_tx.clone(),
         connected_at: now,
-        last_activity: now,
+        last_activity_ms: std::sync::atomic::AtomicU64::new(0),
         accept_language,
         remote_ip,
         timezone: browser_timezone,
@@ -534,9 +534,16 @@ pub async fn handle_connection(
             },
         };
 
-        // Touch activity timestamp.
-        if let Some(client) = state.inner.write().await.clients.get_mut(&conn_id) {
-            client.touch();
+        // Touch activity timestamp (lock-free atomic, no write lock needed).
+        {
+            let t = std::time::Instant::now();
+            if let Some(client) = state.client_registry.read().await.clients.get(&conn_id) {
+                client.touch();
+            }
+            let ms = t.elapsed().as_millis();
+            if ms > 50 {
+                warn!(conn_id = %conn_id, ms, "ws: touch read-lock slow");
+            }
         }
 
         match frame {
@@ -560,7 +567,16 @@ pub async fn handle_connection(
                     state: Arc::clone(&state),
                     channel: req.channel,
                 };
+                let _rpc_t = std::time::Instant::now();
                 let response = methods.dispatch(ctx).await;
+                let rpc_ms = _rpc_t.elapsed().as_millis();
+                // Always log RPCs so CI gateway.log shows whether they arrive.
+                // TODO: remove once CI RPC issue is diagnosed.
+                if rpc_ms > 50 {
+                    warn!(conn_id = %conn_id, method = %req.method, rpc_ms, ok = response.ok, "ws: RPC slow");
+                } else {
+                    info!(conn_id = %conn_id, method = %req.method, rpc_ms, ok = response.ok, "ws: RPC");
+                }
                 if state.ws_request_logs {
                     info!(
                         conn_id = %conn_id,
@@ -633,7 +649,7 @@ pub async fn handle_connection(
     #[cfg(feature = "metrics")]
     moltis_metrics::gauge!(moltis_metrics::websocket::CONNECTIONS_ACTIVE).decrement(1.0);
 
-    debug!(
+    warn!(
         conn_id = %conn_id,
         duration_secs = duration.as_secs(),
         "ws: connection closed"

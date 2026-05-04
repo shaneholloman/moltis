@@ -107,7 +107,8 @@ pub struct ConnectedClient {
     /// Bounded channel for sending serialized frames to this client's write loop.
     pub sender: mpsc::Sender<String>,
     pub connected_at: Instant,
-    pub last_activity: Instant,
+    /// Milliseconds since process start. Updated atomically — no write lock needed.
+    pub last_activity_ms: std::sync::atomic::AtomicU64,
     /// The `Accept-Language` header from the WebSocket upgrade request, forwarded
     /// to web tools so fetched pages and search results match the user's locale.
     pub accept_language: Option<String>,
@@ -170,9 +171,23 @@ impl ConnectedClient {
         self.sender.try_send(frame.to_string()).is_ok()
     }
 
-    /// Touch the activity timestamp.
-    pub fn touch(&mut self) {
-        self.last_activity = Instant::now();
+    /// Touch the activity timestamp (lock-free).
+    pub fn touch(&self) {
+        use std::sync::atomic::Ordering;
+        static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let start = *PROCESS_START.get_or_init(Instant::now);
+        self.last_activity_ms
+            .store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Get the elapsed duration since last activity.
+    pub fn last_activity_elapsed(&self) -> std::time::Duration {
+        use std::sync::atomic::Ordering;
+        static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let start = *PROCESS_START.get_or_init(Instant::now);
+        let stored_ms = self.last_activity_ms.load(Ordering::Relaxed);
+        let total_elapsed = start.elapsed().as_millis() as u64;
+        std::time::Duration::from_millis(total_elapsed.saturating_sub(stored_ms))
     }
 }
 
@@ -221,6 +236,39 @@ pub struct DiscoveredHookInfo {
     pub call_count: u64,
     pub failure_count: u64,
     pub avg_latency_ms: u64,
+}
+
+// ── Client registry (separate lock for WS client operations) ────────────────
+
+/// Client connection tracking, split from GatewayInner to avoid lock contention.
+/// broadcast() only needs this read lock — no longer contends with node/config/session writes.
+pub struct ClientRegistryInner {
+    pub clients: HashMap<String, ConnectedClient>,
+    pub active_sessions: HashMap<String, String>,
+    pub active_projects: HashMap<String, String>,
+}
+
+impl ClientRegistryInner {
+    pub fn new() -> Self {
+        Self {
+            clients: HashMap::new(),
+            active_sessions: HashMap::new(),
+            active_projects: HashMap::new(),
+        }
+    }
+
+    pub fn register_client(&mut self, client: ConnectedClient) -> usize {
+        let conn_id = client.conn_id.clone();
+        self.clients.insert(conn_id, client);
+        self.clients.len()
+    }
+
+    pub fn remove_client(&mut self, conn_id: &str) -> (Option<ConnectedClient>, usize) {
+        self.active_sessions.remove(conn_id);
+        self.active_projects.remove(conn_id);
+        let removed = self.clients.remove(conn_id);
+        (removed, self.clients.len())
+    }
 }
 
 // ── Mutable runtime state ────────────────────────────────────────────────────
@@ -456,6 +504,11 @@ pub struct GatewayState {
     /// Lock-free broadcast state (seq counter, GraphQL subscription channel).
     pub broadcaster: Arc<Broadcaster>,
 
+    // ── Client registry (dedicated lock — hot path) ─────────────────────────
+    /// WS client connections, session/project mappings. Separate lock so
+    /// broadcast reads don't contend with node/config/session writes.
+    pub client_registry: RwLock<ClientRegistryInner>,
+
     // ── Mutable runtime state (single lock) ─────────────────────────────────
     /// All mutable runtime state, behind a single lock.
     pub inner: RwLock<GatewayInner>,
@@ -558,6 +611,7 @@ impl GatewayState {
             node_count: Arc::new(AtomicUsize::new(0)),
             ssh_target_count: Arc::new(AtomicUsize::new(0)),
             broadcaster: Arc::new(Broadcaster::new()),
+            client_registry: RwLock::new(ClientRegistryInner::new()),
             inner: RwLock::new(GatewayInner::new(hook_registry)),
         })
     }
@@ -622,7 +676,7 @@ impl GatewayState {
 
     /// Register a new client connection.
     pub async fn register_client(&self, client: ConnectedClient) {
-        let count = self.inner.write().await.register_client(client);
+        let count = self.client_registry.write().await.register_client(client);
 
         #[cfg(feature = "metrics")]
         moltis_metrics::gauge!(moltis_metrics::system::CONNECTED_CLIENTS).set(count as f64);
@@ -630,7 +684,7 @@ impl GatewayState {
 
     /// Remove a client by conn_id. Returns the removed client if found.
     pub async fn remove_client(&self, conn_id: &str) -> Option<ConnectedClient> {
-        let (removed, count) = self.inner.write().await.remove_client(conn_id);
+        let (removed, count) = self.client_registry.write().await.remove_client(conn_id);
 
         #[cfg(feature = "metrics")]
         {
@@ -645,7 +699,7 @@ impl GatewayState {
 
     /// Number of connected clients.
     pub async fn client_count(&self) -> usize {
-        self.inner.read().await.clients.len()
+        self.client_registry.read().await.clients.len()
     }
 
     /// Push a reply target for a session (used when a channel message triggers chat.send).
@@ -1023,7 +1077,7 @@ mod tests {
             },
             sender: tx,
             connected_at: Instant::now(),
-            last_activity: Instant::now(),
+            last_activity_ms: std::sync::atomic::AtomicU64::new(0),
             accept_language: None,
             remote_ip: None,
             timezone: None,

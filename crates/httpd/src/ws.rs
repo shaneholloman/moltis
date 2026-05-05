@@ -46,7 +46,7 @@ pub async fn handle_connection(
 ) {
     let conn_id = uuid::Uuid::new_v4().to_string();
     let conn_remote_ip = remote_addr.ip().to_string();
-    debug!(conn_id = %conn_id, remote_ip = %conn_remote_ip, "ws: new connection");
+    info!(conn_id = %conn_id, remote_ip = %conn_remote_ip, "ws: new connection");
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     // Bounded channel prevents unbounded memory growth from slow clients.
@@ -347,7 +347,7 @@ pub async fn handle_connection(
     #[allow(clippy::unwrap_used)] // serializing known-valid struct
     let _ = client_tx.try_send(serde_json::to_string(&resp).unwrap());
 
-    debug!(
+    info!(
         conn_id = %conn_id,
         client_id = %params.client.id,
         client_version = %params.client.version,
@@ -363,22 +363,29 @@ pub async fn handle_connection(
     let browser_timezone = params.timezone.clone();
 
     // Auto-persist browser timezone to USER.md on first connect (one-time).
+    // Runs in spawn_blocking because discover_and_load / resolve_user_profile
+    // do synchronous file I/O that must not block the async WS task.
     if let Some(ref tz_str) = browser_timezone
         && let Ok(tz) = tz_str.parse::<chrono_tz::Tz>()
     {
-        let write_mode = moltis_config::discover_and_load()
-            .memory
-            .user_profile_write_mode;
-        let existing_user = moltis_config::resolve_user_profile();
-        if existing_user.timezone.as_ref().is_none() && write_mode.allows_auto_write() {
-            let mut user = existing_user;
-            user.timezone = Some(moltis_config::Timezone::from(tz));
-            if let Err(e) = moltis_config::save_user_with_mode(&user, write_mode) {
-                warn!(conn_id = %conn_id, error = %e, "ws: failed to auto-persist timezone");
-            } else {
-                info!(conn_id = %conn_id, timezone = %tz_str, "ws: auto-persisted browser timezone to USER.md");
+        let tz_conn_id = conn_id.clone();
+        let tz_val = tz;
+        let tz_display = tz_str.clone();
+        tokio::task::spawn_blocking(move || {
+            let write_mode = moltis_config::discover_and_load()
+                .memory
+                .user_profile_write_mode;
+            let existing_user = moltis_config::resolve_user_profile();
+            if existing_user.timezone.as_ref().is_none() && write_mode.allows_auto_write() {
+                let mut user = existing_user;
+                user.timezone = Some(moltis_config::Timezone::from(tz_val));
+                if let Err(e) = moltis_config::save_user_with_mode(&user, write_mode) {
+                    warn!(conn_id = %tz_conn_id, error = %e, "ws: failed to auto-persist timezone");
+                } else {
+                    info!(conn_id = %tz_conn_id, timezone = %tz_display, "ws: auto-persisted browser timezone to USER.md");
+                }
             }
-        }
+        });
     }
 
     // v3 clients default to wildcard subscriptions (all events).

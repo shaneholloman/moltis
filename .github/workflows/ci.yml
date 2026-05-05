@@ -326,7 +326,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-          package-manager-cache: false
+          cache: npm
+          cache-dependency-path: crates/web/ui/package-lock.json
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          shared-key: e2e-v1
+          cache-all-crates: true
 
       - name: Install npm dependencies
         working-directory: crates/web/ui
@@ -338,17 +344,25 @@ jobs:
           TAILWINDCSS=./tailwindcss-linux-x64 ./scripts/build-web-assets.sh
 
       - name: Build moltis binary
+        timeout-minutes: 20
         run: cargo build --bin moltis
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('crates/web/ui/package-lock.json') }}
+
       - name: Install Playwright browsers
+        timeout-minutes: 2
         working-directory: crates/web/ui
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       - name: Run E2E tests
         working-directory: crates/web/ui
         env:
           CI: "true"
-        run: npx playwright test
+        run: ./e2e/run-ci.sh
 
       - name: Upload test results
         if: ${{ !cancelled() }}
@@ -358,6 +372,7 @@ jobs:
           path: |
             crates/web/ui/playwright-report/
             crates/web/ui/test-results/
+            target/e2e-runtime*/gateway.log
           if-no-files-found: ignore
           retention-days: 14
 

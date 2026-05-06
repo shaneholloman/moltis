@@ -17,6 +17,11 @@ const processDefaultShard =
 	processShardTotal > 0 &&
 	processShardIndex <= processShardTotal;
 const skipDefaultProjects = isCi && process.env.MOLTIS_E2E_SKIP_DEFAULT_PROJECTS === "1";
+const onlyProject = process.env.MOLTIS_E2E_ONLY_PROJECT || "";
+
+function includeProject(name) {
+	return !onlyProject || onlyProject === name;
+}
 
 function pickFreePort() {
 	return execFileSync(
@@ -66,9 +71,10 @@ function defaultSpecFiles() {
 }
 
 const defaultSpecWeights = new Map([
-	// Keep CI shards balanced by test count. Specs with data-driven tests can
-	// look small in source but expand heavily after Playwright loads them.
-	["settings-nav.spec.js", 48],
+	// Keep CI shards balanced by observed runtime. Some settings specs do much
+	// more UI setup than their raw test count suggests.
+	["settings-nav.spec.js", 34],
+	["settings-channels.spec.js", 32],
 	["sessions.spec.js", 26],
 	["cron.spec.js", 21],
 	["chat-input.spec.js", 20],
@@ -161,7 +167,7 @@ const defaultProjectIgnore = [
 	/oauth\.spec/,
 ];
 const defaultProjects = (() => {
-	if (skipDefaultProjects) return [];
+	if (skipDefaultProjects || !includeProject("default")) return [];
 	if (processDefaultShard) {
 		const shardFiles = shardSpecFiles(defaultSpecFiles(), processShardTotal)[processShardIndex - 1] || [];
 		return [
@@ -184,64 +190,78 @@ const defaultProjects = (() => {
 		},
 	];
 })();
-const projects = defaultProjects.concat([
-	isCi
-		? {
-				name: "agents",
-				testMatch: /agents\.spec/,
-				use: {
-					baseURL: agentsBaseURL,
-				},
-			}
-		: {
-				name: "agents",
-				testMatch: /agents\.spec/,
-				dependencies: ["default"],
-			},
-	isCi
-		? {
-				name: "auth",
-				testMatch: /\/auth\.spec/,
-				use: {
-					baseURL: authBaseURL,
-				},
-			}
-		: {
-				name: "auth",
-				testMatch: /\/auth\.spec/,
-				dependencies: ["default"],
-			},
-	{
-		name: "onboarding",
-		testMatch: /onboarding(?:-openai)?\.spec/,
-		use: {
-			baseURL: onboardingBaseURL,
-		},
-	},
-	{
-		name: "onboarding-auth",
-		testMatch: /onboarding-auth\.spec/,
-		use: {
-			baseURL: onboardingAuthBaseURL,
-		},
-	},
-	{
-		name: "oauth",
-		testMatch: /oauth\.spec/,
-		use: {
-			baseURL: oauthBaseURL,
-		},
-	},
-	{
-		name: "onboarding-anthropic",
-		testMatch: /onboarding-anthropic\.spec/,
-		use: {
-			baseURL: onboardingAnthropicBaseURL,
-		},
-	},
-]);
+const projects = defaultProjects.concat(
+	[
+		includeProject("agents")
+			? isCi
+				? {
+						name: "agents",
+						testMatch: /agents\.spec/,
+						use: {
+							baseURL: agentsBaseURL,
+						},
+					}
+				: {
+						name: "agents",
+						testMatch: /agents\.spec/,
+						dependencies: ["default"],
+					}
+			: null,
+		includeProject("auth")
+			? isCi
+				? {
+						name: "auth",
+						testMatch: /\/auth\.spec/,
+						use: {
+							baseURL: authBaseURL,
+						},
+					}
+				: {
+						name: "auth",
+						testMatch: /\/auth\.spec/,
+						dependencies: ["default"],
+					}
+			: null,
+		includeProject("onboarding")
+			? {
+					name: "onboarding",
+					testMatch: /onboarding(?:-openai)?\.spec/,
+					use: {
+						baseURL: onboardingBaseURL,
+					},
+				}
+			: null,
+		includeProject("onboarding-auth")
+			? {
+					name: "onboarding-auth",
+					testMatch: /onboarding-auth\.spec/,
+					use: {
+						baseURL: onboardingAuthBaseURL,
+					},
+				}
+			: null,
+		includeProject("oauth")
+			? {
+					name: "oauth",
+					testMatch: /oauth\.spec/,
+					use: {
+						baseURL: oauthBaseURL,
+					},
+				}
+			: null,
+		includeProject("onboarding-anthropic")
+			? {
+					name: "onboarding-anthropic",
+					testMatch: /onboarding-anthropic\.spec/,
+					use: {
+						baseURL: onboardingAnthropicBaseURL,
+					},
+				}
+			: null,
+	].filter(Boolean),
+);
 
-if (enableOpenAiLiveProject) {
+if (enableOpenAiLiveProject && includeProject("openai-live")) {
 	projects.push({
 		name: "openai-live",
 		testMatch: /openai-live\.spec/,
@@ -251,7 +271,7 @@ if (enableOpenAiLiveProject) {
 	});
 }
 
-if (ollamaQwenLiveEnabled) {
+if (ollamaQwenLiveEnabled && includeProject("ollama-qwen-live")) {
 	projects.push({
 		name: "ollama-qwen-live",
 		testMatch: /ollama-qwen-live\.spec/,
@@ -276,7 +296,7 @@ function gatewayServer({ baseURL: serverBaseURL, name, port: serverPort }) {
 	};
 }
 
-const defaultWebServers = isCi
+const defaultWebServers = includeProject("default") && !skipDefaultProjects && isCi
 	? defaultPorts.map((defaultPort) =>
 			gatewayServer({
 				baseURL,
@@ -284,7 +304,8 @@ const defaultWebServers = isCi
 				port: defaultPort,
 			}),
 		)
-	: [
+	: includeProject("default") && !skipDefaultProjects
+		? [
 			{
 				command: "./e2e/start-gateway.sh",
 				cwd: __dirname,
@@ -296,62 +317,74 @@ const defaultWebServers = isCi
 					MOLTIS_E2E_PORT: port,
 				},
 			},
-		];
+			]
+		: [];
 const ciIsolatedProjectWebServers = isCi
 	? [
-			gatewayServer({ baseURL: agentsBaseURL, name: "agents", port: agentsPort }),
-			gatewayServer({ baseURL: authBaseURL, name: "auth", port: authPort }),
-		]
+			includeProject("agents") ? gatewayServer({ baseURL: agentsBaseURL, name: "agents", port: agentsPort }) : null,
+			includeProject("auth") ? gatewayServer({ baseURL: authBaseURL, name: "auth", port: authPort }) : null,
+		].filter(Boolean)
 	: [];
 
-const webServer = defaultWebServers.concat(ciIsolatedProjectWebServers, [
-	{
-		command: "./e2e/start-gateway-onboarding.sh",
-		cwd: __dirname,
-		url: `${onboardingBaseURL}/health`,
-		reuseExistingServer: reuseExistingServer,
-		timeout: 60_000,
-		env: {
-			...process.env,
-			MOLTIS_E2E_ONBOARDING_PORT: onboardingPort,
-		},
-	},
-	{
-		command: "./e2e/start-gateway-onboarding-auth.sh",
-		cwd: __dirname,
-		url: `${onboardingAuthBaseURL}/health`,
-		reuseExistingServer: reuseExistingServer,
-		timeout: 60_000,
-		env: {
-			...process.env,
-			MOLTIS_E2E_ONBOARDING_AUTH_PORT: onboardingAuthPort,
-		},
-	},
-	{
-		command: "./e2e/start-gateway-oauth.sh",
-		cwd: __dirname,
-		url: `${oauthBaseURL}/health`,
-		reuseExistingServer: reuseExistingServer,
-		timeout: 60_000,
-		env: {
-			...process.env,
-			MOLTIS_E2E_OAUTH_PORT: oauthPort,
-		},
-	},
-	{
-		command: "./e2e/start-gateway-onboarding-anthropic.sh",
-		cwd: __dirname,
-		url: `${onboardingAnthropicBaseURL}/health`,
-		reuseExistingServer: reuseExistingServer,
-		timeout: 60_000,
-		env: {
-			...process.env,
-			MOLTIS_E2E_ONBOARDING_ANTHROPIC_PORT: onboardingAnthropicPort,
-		},
-	},
-]);
+const webServer = defaultWebServers.concat(
+	ciIsolatedProjectWebServers,
+	[
+		includeProject("onboarding")
+			? {
+					command: "./e2e/start-gateway-onboarding.sh",
+					cwd: __dirname,
+					url: `${onboardingBaseURL}/health`,
+					reuseExistingServer: reuseExistingServer,
+					timeout: 60_000,
+					env: {
+						...process.env,
+						MOLTIS_E2E_ONBOARDING_PORT: onboardingPort,
+					},
+				}
+			: null,
+		includeProject("onboarding-auth")
+			? {
+					command: "./e2e/start-gateway-onboarding-auth.sh",
+					cwd: __dirname,
+					url: `${onboardingAuthBaseURL}/health`,
+					reuseExistingServer: reuseExistingServer,
+					timeout: 60_000,
+					env: {
+						...process.env,
+						MOLTIS_E2E_ONBOARDING_AUTH_PORT: onboardingAuthPort,
+					},
+				}
+			: null,
+		includeProject("oauth")
+			? {
+					command: "./e2e/start-gateway-oauth.sh",
+					cwd: __dirname,
+					url: `${oauthBaseURL}/health`,
+					reuseExistingServer: reuseExistingServer,
+					timeout: 60_000,
+					env: {
+						...process.env,
+						MOLTIS_E2E_OAUTH_PORT: oauthPort,
+					},
+				}
+			: null,
+		includeProject("onboarding-anthropic")
+			? {
+					command: "./e2e/start-gateway-onboarding-anthropic.sh",
+					cwd: __dirname,
+					url: `${onboardingAnthropicBaseURL}/health`,
+					reuseExistingServer: reuseExistingServer,
+					timeout: 60_000,
+					env: {
+						...process.env,
+						MOLTIS_E2E_ONBOARDING_ANTHROPIC_PORT: onboardingAnthropicPort,
+					},
+				}
+			: null,
+	].filter(Boolean),
+);
 
-if (enableOpenAiLiveProject) {
+if (enableOpenAiLiveProject && includeProject("openai-live")) {
 	webServer.push({
 		command: "./e2e/start-gateway-openai-live.sh",
 		cwd: __dirname,
@@ -365,7 +398,7 @@ if (enableOpenAiLiveProject) {
 	});
 }
 
-if (ollamaQwenLiveEnabled) {
+if (ollamaQwenLiveEnabled && includeProject("ollama-qwen-live")) {
 	webServer.push({
 		command: "./e2e/start-gateway-ollama-qwen-live.sh",
 		cwd: __dirname,
@@ -387,9 +420,11 @@ module.exports = defineConfig({
 	},
 	fullyParallel: false,
 	forbidOnly: !!process.env.CI,
-	retries: 1,
+	retries: 0,
 	workers: 1,
-	reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : [["list"], ["html", { open: "never" }]],
+	reporter: process.env.CI
+		? [[path.join(__dirname, "e2e/ci-dot-reporter.cjs")], ["github"], ["html", { open: "never" }]]
+		: [["list"], ["html", { open: "never" }]],
 	use: {
 		baseURL: baseURL,
 		locale: "en-US",

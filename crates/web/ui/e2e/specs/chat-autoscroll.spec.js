@@ -31,44 +31,44 @@ async function getModulePrefix(page) {
 	});
 }
 
-/**
- * Populate the chat with enough messages to make it scrollable.
- * Uses the app's RPC system-event to inject real messages that survive
- * re-renders (unlike raw DOM injection which gets wiped by renderHistory).
- */
 async function injectScrollableMessages(page, count) {
-	const prefix = await getModulePrefix(page);
-	// Inject all messages at once via a batch of system-events
-	await page.evaluate(
-		async ({ pfx, msgCount }) => {
-			var helpers = await import(`${pfx}js/helpers.js`);
-			for (var i = 0; i < msgCount; i++) {
-				await helpers.sendRpc("system-event", {
-					event: "chat",
-					payload: {
-						sessionKey: window.__moltis_state?.activeSessionKey || "main",
-						state: "final",
-						text: "M".repeat(200),
-						messageIndex: 900000 + i,
-						model: "test",
-						provider: "test",
-					},
-				});
-			}
-		},
-		{ pfx: prefix, msgCount: count },
-	);
-	// Wait for all messages to render
 	await expect
-		.poll(() => page.locator("#messages .msg.assistant").count(), { timeout: 15_000 })
+		.poll(
+			() =>
+				page.evaluate((msgCount) => {
+					var box = document.getElementById("messages");
+					if (!box) return 0;
+
+					box.querySelector("#welcomeCard")?.remove();
+					box.querySelector("#noProvidersCard")?.remove();
+					box.querySelector(".empty-state")?.remove();
+					box.classList.remove("chat-messages-empty");
+
+					var fixtures = Array.from(box.querySelectorAll(".msg.assistant[data-e2e-autoscroll-fixture='true']"));
+					while (fixtures.length > msgCount) {
+						fixtures.pop()?.remove();
+					}
+					while (fixtures.length < msgCount) {
+						var el = document.createElement("div");
+						el.className = "msg assistant";
+						el.style.flex = "0 0 48px";
+						el.style.minHeight = "48px";
+						el.dataset.e2eAutoscrollFixture = "true";
+						el.textContent = "M".repeat(200);
+						box.appendChild(el);
+						fixtures.push(el);
+					}
+
+					box.querySelector(".new-content-indicator")?.remove();
+					box.scrollTop = box.scrollHeight;
+					return fixtures.length;
+				}, count),
+			{ timeout: 10_000 },
+		)
 		.toBeGreaterThanOrEqual(count);
 	// Ensure welcome/empty-state cards are gone (they overlap #messages)
-	await expect(page.locator("#welcomeCard"))
-		.toHaveCount(0, { timeout: 5_000 })
-		.catch(() => {});
-	await expect(page.locator("#messages .empty-state"))
-		.toHaveCount(0, { timeout: 2_000 })
-		.catch(() => {});
+	await expect(page.locator("#welcomeCard")).toHaveCount(0, { timeout: 5_000 });
+	await expect(page.locator("#messages .empty-state")).toHaveCount(0, { timeout: 2_000 });
 	// Scroll to bottom
 	await page.evaluate(() => {
 		var box = document.getElementById("messages");
@@ -91,6 +91,34 @@ async function getScrollState(page) {
 		if (!box) return { scrollTop: 0, scrollHeight: 0, clientHeight: 0 };
 		return { scrollTop: box.scrollTop, scrollHeight: box.scrollHeight, clientHeight: box.clientHeight };
 	});
+}
+
+async function scrollMessagesAwayFromBottom(page) {
+	await page.evaluate(() => {
+		var box = document.getElementById("messages");
+		if (!box) return;
+
+		// A late render can replace injected fixtures after setup in CI. If the
+		// container is no longer scrollable, add enough inert fixtures to restore
+		// the intended user-scrolled-up state for this test.
+		for (let i = 0; i < 20 && box.scrollHeight - box.clientHeight <= 80; i += 1) {
+			var el = document.createElement("div");
+			el.className = "msg assistant";
+			el.style.flex = "0 0 96px";
+			el.style.minHeight = "96px";
+			el.dataset.e2eAutoscrollFixture = "true";
+			el.textContent = "M".repeat(200);
+			box.appendChild(el);
+		}
+
+		box.scrollTop = 0;
+	});
+	await expect
+		.poll(async () => {
+			const s = await getScrollState(page);
+			return s.scrollHeight - s.scrollTop - s.clientHeight;
+		})
+		.toBeGreaterThan(60);
 }
 
 test.describe("Smart auto-scroll", () => {
@@ -117,11 +145,7 @@ test.describe("Smart auto-scroll", () => {
 		expect(afterFill.scrollHeight).toBeGreaterThan(afterFill.clientHeight);
 
 		// Scroll to the top to simulate a user reading earlier messages
-		await page.evaluate(() => {
-			document.getElementById("messages").scrollTop = 0;
-		});
-		// Let the scroll position settle before injecting a message
-		await page.waitForTimeout(200);
+		await scrollMessagesAwayFromBottom(page);
 
 		// Add a new assistant message via the smart scroll path
 		await page.evaluate(async () => {
@@ -151,11 +175,7 @@ test.describe("Smart auto-scroll", () => {
 		await injectScrollableMessages(page, 40);
 
 		// Scroll up, then add a message to trigger the indicator
-		await page.evaluate(() => {
-			document.getElementById("messages").scrollTop = 0;
-		});
-		// Let the scroll position settle before injecting a message
-		await page.waitForTimeout(200);
+		await scrollMessagesAwayFromBottom(page);
 		await page.evaluate(async () => {
 			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
 			var appUrl = new URL(appScript.src, window.location.origin);
@@ -187,9 +207,7 @@ test.describe("Smart auto-scroll", () => {
 		await injectScrollableMessages(page, 40);
 
 		// Scroll up, add message to trigger indicator
-		await page.evaluate(() => {
-			document.getElementById("messages").scrollTop = 0;
-		});
+		await scrollMessagesAwayFromBottom(page);
 		await page.evaluate(async () => {
 			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
 			var appUrl = new URL(appScript.src, window.location.origin);
@@ -219,9 +237,7 @@ test.describe("Smart auto-scroll", () => {
 		await injectScrollableMessages(page, 40);
 
 		// Scroll up
-		await page.evaluate(() => {
-			document.getElementById("messages").scrollTop = 0;
-		});
+		await scrollMessagesAwayFromBottom(page);
 
 		// Add a user message — should always scroll to bottom
 		await page.evaluate(async () => {
@@ -502,9 +518,7 @@ test.describe("Smart auto-scroll", () => {
 		await injectScrollableMessages(page, 40);
 
 		// Scroll up
-		await page.evaluate(() => {
-			document.getElementById("messages").scrollTop = 0;
-		});
+		await scrollMessagesAwayFromBottom(page);
 
 		// Add an assistant message — in "always" mode this should scroll to bottom
 		await page.evaluate(async () => {

@@ -2,7 +2,7 @@ use crate::multimodal::parse_data_uri;
 
 use super::{
     chat::{ChatMessage, ContentPart, UserContent},
-    decode_tool_call_arguments,
+    decode_tool_call_arguments_with_diagnostic,
     types::{TOOL_CALL_METADATA_KEYS, ToolCall},
 };
 
@@ -16,11 +16,16 @@ pub fn extract_tool_call_metadata(
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     let obj = tc.as_object()?;
     let nested = obj.get("metadata").and_then(serde_json::Value::as_object);
+    let gemini = obj
+        .get("extra_content")
+        .and_then(|extra| extra.get("google"))
+        .and_then(serde_json::Value::as_object);
     let meta: serde_json::Map<_, _> = TOOL_CALL_METADATA_KEYS
         .iter()
         .filter_map(|&k| {
             obj.get(k)
                 .or_else(|| nested.and_then(|metadata| metadata.get(k)))
+                .or_else(|| gemini.and_then(|metadata| metadata.get(k)))
                 .map(|v| (k.to_string(), v.clone()))
         })
         .collect();
@@ -168,6 +173,10 @@ pub fn values_to_chat_messages(values: &[serde_json::Value]) -> Vec<ChatMessage>
             },
             "assistant" => {
                 let content = val["content"].as_str().map(|s| s.to_string());
+                let reasoning = val["reasoning"].as_str().and_then(|s| {
+                    let trimmed = s.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                });
                 let tool_calls: Vec<ToolCall> = val["tool_calls"]
                     .as_array()
                     .map(|tcs| {
@@ -175,13 +184,15 @@ pub fn values_to_chat_messages(values: &[serde_json::Value]) -> Vec<ChatMessage>
                             .filter_map(|tc| {
                                 let id = tc["id"].as_str()?.to_string();
                                 let name = tc["function"]["name"].as_str()?.to_string();
-                                let arguments =
-                                    decode_tool_call_arguments(tc["function"].get("arguments"));
+                                let decoded = decode_tool_call_arguments_with_diagnostic(
+                                    tc["function"].get("arguments"),
+                                );
                                 let metadata = extract_tool_call_metadata(tc);
                                 Some(ToolCall {
                                     id,
                                     name,
-                                    arguments,
+                                    arguments: decoded.arguments,
+                                    argument_diagnostic: decoded.diagnostic,
                                     metadata,
                                 })
                             })
@@ -194,6 +205,7 @@ pub fn values_to_chat_messages(values: &[serde_json::Value]) -> Vec<ChatMessage>
                 messages.push(ChatMessage::Assistant {
                     content,
                     tool_calls,
+                    reasoning,
                 });
             },
             "tool" => {
@@ -216,6 +228,16 @@ pub fn values_to_chat_messages(values: &[serde_json::Value]) -> Vec<ChatMessage>
                 if !pending_tool_call_ids.remove(&tool_call_id) {
                     tracing::debug!(tool_call_id, "skipping orphan tool_result message");
                     continue;
+                }
+                if let Some(reasoning) = val["reasoning"].as_str().and_then(|s| {
+                    let trimmed = s.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }) {
+                    attach_reasoning_to_assistant_tool_call(
+                        &mut messages,
+                        &tool_call_id,
+                        reasoning,
+                    );
                 }
                 let content = if let Some(err) = val["error"].as_str() {
                     format!("Error: {err}")
@@ -242,4 +264,35 @@ pub fn values_to_chat_messages(values: &[serde_json::Value]) -> Vec<ChatMessage>
         }
     }
     messages
+}
+
+fn attach_reasoning_to_assistant_tool_call(
+    messages: &mut [ChatMessage],
+    tool_call_id: &str,
+    tool_reasoning: String,
+) {
+    for message in messages.iter_mut().rev() {
+        let ChatMessage::Assistant {
+            tool_calls,
+            reasoning,
+            ..
+        } = message
+        else {
+            continue;
+        };
+
+        if tool_calls
+            .iter()
+            .any(|tool_call| tool_call.id == tool_call_id)
+        {
+            if reasoning.is_none() {
+                *reasoning = Some(tool_reasoning);
+            }
+            return;
+        }
+    }
+    tracing::debug!(
+        tool_call_id,
+        "no assistant message found for reasoning attachment"
+    );
 }

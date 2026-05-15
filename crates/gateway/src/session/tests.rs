@@ -653,6 +653,7 @@ mod tests {
                     "role": "assistant",
                     "content": "hi there",
                     "audio": existing_path,
+                    "tts_provider": "openai",
                     "run_id": "run-abc",
                 }),
             )
@@ -673,6 +674,7 @@ mod tests {
 
         assert_eq!(result["reused"], true);
         assert_eq!(result["audio"].as_str(), Some("media/main/voice-msg-1.ogg"));
+        assert_eq!(result["ttsProvider"].as_str(), Some("openai"));
         assert_eq!(mock_tts.convert_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -707,6 +709,7 @@ mod tests {
             serde_json::json!({ "enabled": true, "maxTextLength": 8000 }),
             Some(serde_json::json!({
                 "audio": general_purpose::STANDARD.encode(&audio_bytes),
+                "provider": "elevenlabs",
             })),
         ));
         let service = LiveSessionService::new(Arc::clone(&store), metadata)
@@ -720,10 +723,12 @@ mod tests {
         assert_eq!(result["reused"], false);
         let audio_path = result["audio"].as_str().unwrap_or_default().to_string();
         assert_eq!(audio_path, "media/main/voice-msg-1.ogg");
+        assert_eq!(result["ttsProvider"].as_str(), Some("elevenlabs"));
         assert_eq!(mock_tts.convert_calls.load(Ordering::SeqCst), 1);
 
         let history = store.read("main").await.expect("read history");
         assert_eq!(history[1]["audio"].as_str(), Some(audio_path.as_str()));
+        assert_eq!(history[1]["tts_provider"].as_str(), Some("elevenlabs"));
 
         let filename = media_filename(&audio_path).expect("filename");
         let saved = store
@@ -858,6 +863,50 @@ mod tests {
         moltis_projects::run_migrations(&pool).await.unwrap();
         SqliteSessionMetadata::init(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn restore_sandbox_router_overrides_rehydrates_persisted_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        metadata
+            .upsert("session:abc", Some("Cloud session".to_string()))
+            .await
+            .unwrap();
+        metadata
+            .set_sandbox_backend("session:abc", Some("restricted-host".to_string()))
+            .await;
+        metadata
+            .set_sandbox_image("session:abc", Some("custom:image".to_string()))
+            .await;
+        metadata
+            .set_sandbox_enabled("session:abc", Some(true))
+            .await;
+
+        let mut router = SandboxRouter::new(moltis_tools::sandbox::SandboxConfig {
+            backend: "docker".to_string(),
+            ..Default::default()
+        });
+        router.register_backend(Arc::new(moltis_tools::sandbox::RestrictedHostSandbox::new(
+            moltis_tools::sandbox::SandboxConfig::default(),
+        )));
+        let router = Arc::new(router);
+        let service = LiveSessionService::new(store, Arc::clone(&metadata))
+            .with_sandbox_router(Arc::clone(&router));
+
+        service.restore_sandbox_router_overrides().await;
+
+        assert_eq!(
+            router.resolve_backend("session:abc").await.backend_name(),
+            "restricted-host"
+        );
+        assert!(router.is_sandboxed("session:abc").await);
+        assert_eq!(
+            router.resolve_image("session:abc", None).await,
+            "custom:image"
+        );
     }
 
     #[tokio::test]

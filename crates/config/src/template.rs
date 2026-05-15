@@ -540,7 +540,7 @@ port = {port}                           # Port number (auto-generated for this i
 
 # [voice.tts]
 # enabled = true
-# providers = ["openai", "elevenlabs"]  # UI allowlist (empty = show all)
+# providers = []                        # UI allowlist (empty = show all)
 
 # Voice personas — named voice identities injected into TTS calls.
 # Personas are managed via the web UI (Settings > Voice > Voice Personas)
@@ -557,7 +557,12 @@ port = {port}                           # Port number (auto-generated for this i
 
 # [voice.stt]
 # enabled = true
-# providers = ["whisper", "mistral", "elevenlabs"]  # UI allowlist (empty = show all)
+# providers = []                        # UI allowlist (empty = show all)
+
+# [voice.stt.whisper_local]
+# endpoint = "http://localhost:8080"    # OpenAI-compatible transcription server
+# model = "whisper-large-v3"            # Model name (server-specific)
+# language = "en"                       # Optional ISO 639-1 hint
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NGROK
@@ -585,6 +590,31 @@ port = {port}                           # Port number (auto-generated for this i
 # agent_write_mode = "hybrid"       # "hybrid" | "prompt-only" | "search-only" | "off"
 # backend = "builtin"               # "builtin" | "qmd"
 # provider = "auto"                 # "local" | "ollama" | "openai" | "custom"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHONE (Telephony Providers)
+# ══════════════════════════════════════════════════════════════════════════════
+# Configure telephony providers for making and receiving phone calls.
+# Provider credentials are stored securely via the web UI (Settings > Phone).
+
+# [phone]
+# enabled = false                           # Enable phone calls globally
+# provider = "twilio"                       # Active provider
+# inbound_policy = "disabled"               # disabled | allowlist | open
+# allowlist = []                            # Allowed inbound callers (E.164)
+# max_duration_secs = 3600                  # Max call duration (1 hour)
+
+# [phone.twilio]
+# from_number = "+15551234567"              # Your Twilio phone number (E.164)
+# webhook_url = "https://your-domain.com"   # Public URL for Twilio callbacks
+
+# [phone.telnyx]
+# from_number = "+15551234567"              # Your Telnyx phone number (E.164)
+# webhook_url = "https://your-domain.com"   # Public URL for Telnyx callbacks
+
+# [phone.plivo]
+# from_number = "+15551234567"              # Your Plivo phone number (E.164)
+# webhook_url = "https://your-domain.com"   # Public URL for Plivo callbacks
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CHANNELS

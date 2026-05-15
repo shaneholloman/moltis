@@ -97,6 +97,7 @@ const READ_METHODS: &[&str] = &[
     "last-heartbeat",
     "node.list",
     "node.describe",
+    "node.pairing.status",
     "chat.history",
     "chat.context",
     "chat.raw_prompt",
@@ -130,6 +131,9 @@ const READ_METHODS: &[&str] = &[
     "openclaw.detect",
     "openclaw.scan",
     "system.describe",
+    "voicecall.status",
+    #[cfg(feature = "telephony")]
+    "phone.providers.all",
 ];
 
 const WRITE_METHODS: &[&str] = &[
@@ -168,6 +172,7 @@ const WRITE_METHODS: &[&str] = &[
     "node.invoke",
     "nodes.set_session",
     "chat.send",
+    "chat.send_sync",
     "chat.abort",
     "chat.cancel_queued",
     "chat.clear",
@@ -257,6 +262,16 @@ const WRITE_METHODS: &[&str] = &[
     "hooks.reload",
     "location.result",
     "openclaw.import",
+    "voicecall.initiate",
+    "voicecall.end",
+    #[cfg(feature = "telephony")]
+    "phone.provider.toggle",
+    #[cfg(feature = "telephony")]
+    "phone.config.save_key",
+    #[cfg(feature = "telephony")]
+    "phone.config.save_settings",
+    #[cfg(feature = "telephony")]
+    "phone.config.remove_key",
     "subscribe",
     "unsubscribe",
     "channel.join",
@@ -271,6 +286,9 @@ const PAIRING_METHODS: &[&str] = &[
     "node.pair.approve",
     "node.pair.reject",
     "node.pair.verify",
+    "node.pairing.enable",
+    "node.pairing.disable",
+    "node.pairing.status",
     "device.pair.list",
     "device.pair.approve",
     "device.pair.reject",
@@ -718,6 +736,15 @@ mod tests {
         assert_eq!(
             resp.error.as_ref().map(|e| e.code.as_str()),
             Some("UNKNOWN_METHOD")
+        );
+    }
+
+    #[test]
+    fn chat_send_sync_is_registered_and_authorized() {
+        let reg = MethodRegistry::new();
+        assert!(reg.method_names().contains(&"chat.send_sync".to_string()));
+        assert!(
+            authorize_method("chat.send_sync", "operator", &scopes(&["operator.write"])).is_none()
         );
     }
 

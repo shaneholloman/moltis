@@ -31,6 +31,8 @@ export let chatSeq = 0;
 export let sessionTokens: SessionTokens = { input: 0, output: 0 };
 // Last observed prompt input tokens (context pressure for the next turn).
 export let sessionCurrentInputTokens = 0;
+// Last assistant turn context tokens, matching OpenCode's input+output+cache basis.
+export let sessionCurrentContextTokens = 0;
 
 // Model selector elements — created dynamically inside the chat page
 export let modelCombo: HTMLElement | null = null;
@@ -61,6 +63,7 @@ export let sandboxToggleBtn: HTMLButtonElement | null = null;
 export let sandboxLabel: HTMLElement | null = null;
 export let sessionSandboxEnabled = true;
 export let sessionSandboxImage: string | null = null;
+export let sessionSandboxBackend: string | null = null;
 export let sandboxImageBtn: HTMLButtonElement | null = null;
 export let sandboxImageDropdown: HTMLElement | null = null;
 export let sandboxImageLabel: HTMLElement | null = null;
@@ -179,6 +182,9 @@ export function setSessionTokens(v: SessionTokens): void {
 export function setSessionCurrentInputTokens(v: number): void {
 	sessionCurrentInputTokens = v;
 }
+export function setSessionCurrentContextTokens(v: number): void {
+	sessionCurrentContextTokens = v;
+}
 export function setModelCombo(v: HTMLElement | null): void {
 	modelCombo = v;
 }
@@ -245,6 +251,9 @@ export function setSessionSandboxEnabled(v: boolean): void {
 }
 export function setSessionSandboxImage(v: string | null): void {
 	sessionSandboxImage = v;
+}
+export function setSessionSandboxBackend(v: string | null): void {
+	sessionSandboxBackend = v;
 }
 export function setSandboxImageBtn(v: HTMLButtonElement | null): void {
 	sandboxImageBtn = v;

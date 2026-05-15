@@ -483,11 +483,49 @@ install_proxmox() {
         error "This does not appear to be a Proxmox VE host."
     fi
 
-    # Use the community-scripts helper when merged upstream, fall back to fork.
-    PROXMOX_SCRIPT_URL="https://raw.githubusercontent.com/moltis-org/ProxmoxVED/feat/moltis/ct/moltis.sh"
+    PROXMOX_REPO_URL="https://raw.githubusercontent.com/moltis-org/ProxmoxVED/feat/moltis"
+    PROXMOX_SCRIPT_URL="$PROXMOX_REPO_URL/ct/moltis.sh"
+
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' EXIT
+    proxmox_script="$tmpdir/moltis-proxmox.sh"
+    patched_script="$tmpdir/moltis-proxmox-patched.sh"
+
+    download "$PROXMOX_SCRIPT_URL" "$proxmox_script" || error "Failed to download Proxmox helper"
+
+    # Patch the fetched helper at launch time for Moltis-specific fixes that live
+    # in remote community-scripts files: keep /usr/bin/update on the Moltis fork,
+    # and make the Docker prompt safe when lxc-attach has no interactive stdin.
+    awk -v repo_url="$PROXMOX_REPO_URL" '
+        {
+            if ($0 ~ /^source <\(curl -fsSL / && !curl_patched) {
+                print "curl() {"
+                print "  case \"${*: -1}\" in"
+                print "    */install/moltis-install.sh)"
+                print "      command curl \"$@\" | sed '\''s|^[[:space:]]*read -r -p \".*Docker for sandbox support.*\" prompt$|if [[ -t 0 ]]; then &; else prompt=\"${MOLTIS_INSTALL_DOCKER:-no}\"; fi|'\''"
+                print "      ;;"
+                print "    *) command curl \"$@\" ;;"
+                print "  esac"
+                print "}"
+                curl_patched = 1
+            }
+            print
+            if ($0 == "description" && !patched) {
+                q = sprintf("%c", 39)
+                print "pct exec \"$CTID\" -- bash -c \"cat > /usr/bin/update <<" q "MOLTIS_UPDATE_EOF" q
+                print "bash -c \\\"\\$(curl -fsSL " repo_url "/ct/moltis.sh)\\\""
+                print "MOLTIS_UPDATE_EOF"
+                print "chmod +x /usr/bin/update\" || true"
+                patched = 1
+            }
+        }
+    ' "$proxmox_script" >"$patched_script"
+
+    grep -q 'curl()' "$patched_script" || error "Failed to apply Docker prompt patch to Proxmox helper"
+    grep -q 'MOLTIS_UPDATE_EOF' "$patched_script" || error "Failed to apply update URL patch to Proxmox helper"
 
     info "Launching Proxmox VE helper script..."
-    bash -c "$(curl -fsSL "$PROXMOX_SCRIPT_URL")"
+    bash "$patched_script"
 }
 
 install_from_source() {

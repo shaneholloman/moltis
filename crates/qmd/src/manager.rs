@@ -454,7 +454,11 @@ impl QmdManager {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write,
+        os::unix::fs::PermissionsExt,
+    };
 
     use tempfile::TempDir;
 
@@ -531,10 +535,22 @@ exit 0
 "#,
             log_path.display()
         );
-        fs::write(&script, contents).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&script)
+            .unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
         let mut permissions = fs::metadata(&script).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).unwrap();
+
+        // Linux CI can briefly report ETXTBSY when executing a file immediately
+        // after creating it on the runner filesystem.
+        std::thread::sleep(Duration::from_millis(50));
         script
     }
 

@@ -2,13 +2,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Instant,
 };
-
-#[cfg(feature = "graphql")]
-use std::sync::atomic::AtomicBool;
 
 #[cfg(feature = "metrics")]
 use moltis_metrics::MetricsHandle;
@@ -436,6 +433,10 @@ pub struct GatewayState {
     /// Cloud deploy platform (e.g. "flyio", "digitalocean"), read from
     /// `MOLTIS_DEPLOY_PLATFORM`. `None` when running locally.
     pub deploy_platform: Option<String>,
+    /// Whether new node pairing requests are accepted. Disabled by default
+    /// to prevent unauthenticated connection spam. Enable from the web UI or
+    /// via `node.pairing.enable` RPC when you need to pair a new node.
+    pub node_pairing_enabled: AtomicBool,
     /// The port the gateway is bound to.
     pub port: u16,
     /// Monotonic process start timestamp used for uptime calculations.
@@ -574,6 +575,7 @@ impl GatewayState {
             session_event_bus: session_event_bus.unwrap_or_default(),
             deploy_platform,
             port,
+            node_pairing_enabled: AtomicBool::new(false),
             started_at: Instant::now(),
             #[cfg(feature = "graphql")]
             graphql_enabled: AtomicBool::new(true),
@@ -602,8 +604,14 @@ impl GatewayState {
         })
     }
 
-    /// Whether the connection to the client is secure (TLS active on the
-    /// gateway itself, or TLS terminated by an upstream reverse proxy).
+    /// Whether the gateway *may* be serving over a secure channel.
+    ///
+    /// Returns `true` when TLS is active on the gateway listener **or** the
+    /// server is configured behind a reverse proxy.  Note: `behind_proxy`
+    /// alone does not guarantee HTTPS — the proxy-to-client leg may be plain
+    /// HTTP.  For cookie `Secure` attribute decisions, prefer the per-request
+    /// `should_secure_cookie()` helper in `httpd::auth_routes` which inspects
+    /// the `X-Forwarded-Proto` header.
     pub fn is_secure(&self) -> bool {
         self.tls_active || self.behind_proxy
     }

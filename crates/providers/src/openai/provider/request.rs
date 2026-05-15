@@ -116,6 +116,7 @@ impl OpenAiProvider {
             || self.base_url.contains("moonshot.ai")
             || self.base_url.contains("moonshot.cn")
             || self.model.starts_with("kimi-")
+            || self.model.to_ascii_lowercase().starts_with("deepseek-v4")
     }
 
     /// Some providers (e.g. MiniMax) reject `role: "system"` in the messages
@@ -125,6 +126,11 @@ impl OpenAiProvider {
         self.model.starts_with("MiniMax-")
             || self.provider_name.eq_ignore_ascii_case("minimax")
             || self.base_url.to_ascii_lowercase().contains("minimax")
+    }
+
+    fn requires_gemini_tool_call_extra_content(&self) -> bool {
+        self.provider_name.eq_ignore_ascii_case("gemini")
+            || self.base_url.contains("generativelanguage.googleapis.com")
     }
 
     /// Whether this provider rejects `null` in JSON Schema `enum` arrays.
@@ -297,12 +303,17 @@ impl OpenAiProvider {
         messages: &[ChatMessage],
     ) -> Vec<serde_json::Value> {
         let needs_reasoning_content = self.requires_reasoning_content_on_tool_messages();
+        let needs_gemini_tool_call_extra_content = self.requires_gemini_tool_call_extra_content();
         let strip_name = !self.supports_user_name;
         let mut remapped_tool_call_ids = HashMap::new();
         let mut used_tool_call_ids = HashSet::new();
         let mut out = Vec::with_capacity(messages.len());
 
         for message in messages {
+            let assistant_reasoning = match message {
+                ChatMessage::Assistant { reasoning, .. } => reasoning.as_deref(),
+                _ => None,
+            };
             let mut value = message.to_openai_value();
 
             // Strip the `name` field for providers that reject it entirely.
@@ -326,6 +337,15 @@ impl OpenAiProvider {
                         &mut used_tool_call_ids,
                     );
                     tool_call["id"] = serde_json::Value::String(mapped_id);
+
+                    if needs_gemini_tool_call_extra_content
+                        && let Some(thought_signature) = tool_call
+                            .as_object_mut()
+                            .and_then(|obj| obj.remove("thought_signature"))
+                    {
+                        tool_call["extra_content"]["google"]["thought_signature"] =
+                            thought_signature;
+                    }
                 }
             } else if value.get("role").and_then(serde_json::Value::as_str) == Some("tool")
                 && let Some(tool_call_id) = value
@@ -354,11 +374,16 @@ impl OpenAiProvider {
                     .is_some_and(|calls| !calls.is_empty());
 
                 if is_assistant && has_tool_calls {
-                    let reasoning_content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
+                    let reasoning_content = assistant_reasoning
+                        .filter(|reasoning| !reasoning.trim().is_empty())
+                        .map(str::to_string)
+                        .or_else(|| {
+                            value
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_default();
 
                     if value.get("content").is_none() {
                         value["content"] = serde_json::Value::String(String::new());
@@ -688,6 +713,34 @@ mod tests {
     }
 
     #[test]
+    fn gemini_serializes_thought_signature_as_extra_content() {
+        let p = provider(
+            "gemini-3.1-flash-lite-preview",
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        );
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("thought_signature".to_string(), serde_json::json!("sig123"));
+        let messages =
+            p.serialize_messages_for_request(&[ChatMessage::assistant_with_tools(None, vec![
+                moltis_agents::model::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: serde_json::json!({"location": "London"}),
+                    argument_diagnostic: None,
+                    metadata: Some(metadata),
+                },
+            ])]);
+
+        let tool_call = &messages[0]["tool_calls"][0];
+        assert!(tool_call.get("thought_signature").is_none());
+        assert_eq!(
+            tool_call["extra_content"]["google"]["thought_signature"],
+            "sig123"
+        );
+    }
+
+    #[test]
     fn fireworks_native_model_no_reasoning_content() {
         let p = provider(
             "accounts/fireworks/models/glm-5p1",
@@ -704,6 +757,44 @@ mod tests {
     fn moonshot_direct_auto_detects_reasoning_content() {
         let p = provider("kimi-k2.5", "moonshot", "https://api.moonshot.ai/v1");
         assert!(p.requires_reasoning_content_on_tool_messages());
+    }
+
+    #[test]
+    fn deepseek_v4_auto_detects_reasoning_content() {
+        let p = provider("deepseek-v4-flash", "deepseek", "https://api.deepseek.com");
+        assert!(
+            p.requires_reasoning_content_on_tool_messages(),
+            "DeepSeek V4 thinking-mode tool calls require reasoning_content replay (issue #959)"
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_reasoning_effort_enables_thinking_and_maps_xhigh_to_max() {
+        let mut p = provider("deepseek-v4-pro", "deepseek", "https://api.deepseek.com");
+        p.reasoning_effort = Some(moltis_agents::model::ReasoningEffort::ExtraHigh);
+        let mut body = serde_json::json!({
+            "model": "deepseek-v4-pro",
+            "messages": [{"role": "user", "content": "hello"}],
+        });
+
+        p.apply_reasoning_effort_chat(&mut body);
+
+        assert_eq!(body["reasoning_effort"], "max");
+        assert_eq!(body["thinking"], serde_json::json!({ "type": "enabled" }));
+    }
+
+    #[test]
+    fn deepseek_v4_reasoning_effort_maps_lower_levels_to_high() {
+        for effort in [
+            moltis_agents::model::ReasoningEffort::Minimal,
+            moltis_agents::model::ReasoningEffort::Low,
+            moltis_agents::model::ReasoningEffort::Medium,
+            moltis_agents::model::ReasoningEffort::High,
+        ] {
+            let mut p = provider("deepseek-v4-flash", "deepseek", "https://api.deepseek.com");
+            p.reasoning_effort = Some(effort);
+            assert_eq!(p.reasoning_effort_str(), Some("high"));
+        }
     }
 
     // ── Wire-format tests: verify serialized request body (issue #810) ──
@@ -765,6 +856,7 @@ mod tests {
                     id: "call_123".to_string(),
                     name: "get_weather".to_string(),
                     arguments: serde_json::json!({"location": "Berlin"}),
+                    argument_diagnostic: None,
                     metadata: None,
                 },
             ]),
@@ -780,6 +872,51 @@ mod tests {
             assistant_msg.get("reasoning_content").is_some(),
             "assistant tool-call message must have reasoning_content, got: {assistant_msg}"
         );
+    }
+
+    #[test]
+    fn deepseek_v4_replays_persisted_tool_reasoning_content() {
+        let p = provider("deepseek-v4-flash", "deepseek", "https://api.deepseek.com");
+        let persisted = vec![
+            serde_json::json!({"role": "user", "content": "What is the weather?"}),
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_959",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": "{\"location\":\"Berlin\"}"
+                    }
+                }]
+            }),
+            serde_json::json!({
+                "role": "tool_result",
+                "tool_call_id": "call_959",
+                "tool_name": "get_weather",
+                "success": true,
+                "result": {"temperature": 20},
+                "reasoning": "Need live weather before answering."
+            }),
+            serde_json::json!({"role": "assistant", "content": "It is 20 C."}),
+            serde_json::json!({"role": "user", "content": "What about tomorrow?"}),
+        ];
+        let messages = moltis_agents::model::values_to_chat_messages(&persisted);
+
+        let serialized = p.serialize_messages_for_request(&messages);
+
+        let Some(assistant_tool_message) = serialized.iter().find(|message| {
+            message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                && message.get("tool_calls").is_some()
+        }) else {
+            panic!("assistant tool-call message should be serialized");
+        };
+        assert_eq!(
+            assistant_tool_message["reasoning_content"],
+            "Need live weather before answering."
+        );
+        assert_eq!(assistant_tool_message["content"], "");
     }
 
     /// Mistral provider must strip the `name` field from user messages.
@@ -861,6 +998,7 @@ mod tests {
                     id: "call_456".to_string(),
                     name: "get_weather".to_string(),
                     arguments: serde_json::json!({"location": "Paris"}),
+                    argument_diagnostic: None,
                     metadata: None,
                 },
             ]),

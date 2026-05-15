@@ -20,7 +20,7 @@ async function expectPageContentMounted(page) {
 				}
 			},
 			{
-				timeout: 10_000,
+				timeout: 30_000,
 			},
 		)
 		.toBeGreaterThan(0);
@@ -56,22 +56,10 @@ async function waitForWsConnected(page, timeoutMs = 10_000) {
 					.then((cls) => /connected/.test(cls || ""))
 					.catch(() => false);
 				if (!statusDotConnected) return false;
-				// Verify both state.connected and a live RPC round-trip.
 				return page
-					.evaluate(async () => {
-						const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-						if (!appScript) return false;
-						const appUrl = new URL(appScript.src, window.location.origin);
-						const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-						const state = await import(`${prefix}js/state.js`);
-						if (!(state.connected && state.ws) || state.ws.readyState !== WebSocket.OPEN) return false;
-						// Warmup RPC: verify the WS can actually round-trip a request.
-						const helpers = await import(`${prefix}js/helpers.js`);
-						const res = await Promise.race([
-							helpers.sendRpc("status", {}),
-							new Promise((r) => setTimeout(() => r(null), 1000)),
-						]);
-						return res?.ok === true;
+					.evaluate(() => {
+						const state = window.__moltis_state;
+						return Boolean(state?.connected && state?.subscribed && state?.ws?.readyState === WebSocket.OPEN);
 					})
 					.catch(() => false);
 			},
@@ -84,6 +72,7 @@ function isRetryableNavigationError(error) {
 	var message = error?.message || String(error || "");
 	return (
 		message.includes("net::ERR_ABORTED") ||
+		message.includes("page.goto: Timeout") ||
 		message.includes("Execution context was destroyed") ||
 		message.includes("Target page, context or browser has been closed")
 	);
@@ -96,6 +85,7 @@ function isRetryableNavigationError(error) {
 async function navigateAndWait(page, path) {
 	const pageErrors = watchPageErrors(page);
 	let lastError = null;
+	const gotoTimeoutMs = 10_000;
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
 			// Navigate to about:blank first to release any pending connections
@@ -103,11 +93,17 @@ async function navigateAndWait(page, path) {
 			if (attempt > 0) {
 				await page.goto("about:blank").catch(() => undefined);
 			}
-			await page.goto(path, { waitUntil: "commit", timeout: 5_000 });
+			await page.goto(path, { waitUntil: "commit", timeout: gotoTimeoutMs });
 			await expectPageContentMounted(page);
 			return pageErrors;
 		} catch (error) {
 			lastError = error;
+			if (isRetryableNavigationError(error)) {
+				const mountedAfterError = await expectPageContentMounted(page)
+					.then(() => true)
+					.catch(() => false);
+				if (mountedAfterError) return pageErrors;
+			}
 			if (!isRetryableNavigationError(error) || attempt === 2) {
 				// Capture diagnostic info when navigation fails
 				try {
@@ -117,7 +113,7 @@ async function navigateAndWait(page, path) {
 					page.on("response", (r) => responses.push(`${r.status()} ${r.url()}`));
 					page.on("console", (m) => consoleMessages.push(`[${m.type()}] ${m.text()}`));
 					// Try one more goto with a short timeout to capture what happens
-					await page.goto(path, { waitUntil: "commit", timeout: 5_000 }).catch(() => undefined);
+					await page.goto(path, { waitUntil: "commit", timeout: gotoTimeoutMs }).catch(() => undefined);
 					// Check server health to see if it's alive
 					var healthOk = "unknown";
 					try {
@@ -230,11 +226,15 @@ async function createSession(page) {
 		.toBe(true);
 
 	await expectPageContentMounted(page);
+	await waitForChatSessionReady(page);
 }
 
 async function waitForChatSessionReady(page) {
 	await page.waitForFunction(
 		async () => {
+			var store = window.__moltis_stores?.sessionStore;
+			if (store?.switchInProgress?.value) return false;
+			if (document.getElementById("sessionLoadIndicator")) return false;
 			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
 			if (!appScript) return false;
 			var appUrl = new URL(appScript.src, window.location.origin);

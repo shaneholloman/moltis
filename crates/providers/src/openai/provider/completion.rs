@@ -8,13 +8,16 @@ use crate::{
     http::{retry_after_ms_from_headers, with_retry_after_marker},
     ollama::normalize_ollama_api_base_url,
     openai_compat::{
-        parse_openai_compat_usage_from_payload, parse_tool_calls,
-        split_responses_instructions_and_input, strip_think_tags, to_responses_api_tools,
+        normalize_tool_call_arguments_from_schemas, parse_openai_compat_usage_from_payload,
+        parse_tool_calls, split_responses_instructions_and_input, strip_think_tags,
+        to_responses_api_tools,
     },
     raw_model_id,
 };
 
-use moltis_agents::model::{ChatMessage, CompletionResponse, Usage};
+use moltis_agents::model::{
+    ChatMessage, CompletionResponse, Usage, decode_tool_call_arguments_from_str,
+};
 
 use super::OpenAiProvider;
 
@@ -68,17 +71,7 @@ impl OpenAiProvider {
         debug!(model = %self.model, "openai probe request");
         trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "openai probe request body");
 
-        let http_resp = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.api_key.expose_secret()),
-            )
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let http_resp = self.send_chat_completions_request(&body).await?;
 
         let status = http_resp.status();
         if !status.is_success() {
@@ -341,17 +334,7 @@ impl OpenAiProvider {
         );
         trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "openai request body");
 
-        let http_resp = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.api_key.expose_secret()),
-            )
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let http_resp = self.send_chat_completions_request(&body).await?;
 
         let status = http_resp.status();
         if !status.is_success() {
@@ -395,7 +378,8 @@ impl OpenAiProvider {
                 Some(visible)
             }
         });
-        let tool_calls = parse_tool_calls(message);
+        let mut tool_calls = parse_tool_calls(message);
+        normalize_tool_call_arguments_from_schemas(&mut tool_calls, tools);
 
         let usage = parse_openai_compat_usage_from_payload(&resp).unwrap_or_default();
 
@@ -549,15 +533,15 @@ impl OpenAiProvider {
             .zip(fn_call_names)
             .zip(fn_call_args)
             .filter_map(|((id, name), args)| {
-                let arguments: serde_json::Value = serde_json::from_str(&args)
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                let decoded = decode_tool_call_arguments_from_str(&args);
                 if name.is_empty() {
                     return None;
                 }
                 Some(moltis_agents::model::ToolCall {
                     id,
                     name,
-                    arguments,
+                    arguments: decoded.arguments,
+                    argument_diagnostic: decoded.diagnostic,
                     metadata: None,
                 })
             })

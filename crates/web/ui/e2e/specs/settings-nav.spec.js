@@ -32,19 +32,21 @@ test.describe("Settings navigation", () => {
 		await expect(page.locator(".settings-sidebar-nav")).toBeVisible();
 
 		const masks = await page.evaluate(() => {
+			const readableRules = (sheet) => {
+				try {
+					return Array.from(sheet.cssRules || []);
+				} catch {
+					return [];
+				}
+			};
+
 			const readRuleMask = (selector) => {
 				for (const sheet of Array.from(document.styleSheets || [])) {
-					let rules;
-					try {
-						rules = sheet.cssRules;
-					} catch {
-						continue;
-					}
-					if (!rules) continue;
-					for (const rule of Array.from(rules)) {
-						if (rule.type !== CSSRule.STYLE_RULE || rule.selectorText !== selector) continue;
+					const rule = readableRules(sheet).find(
+						(candidate) => candidate.type === CSSRule.STYLE_RULE && candidate.selectorText === selector,
+					);
+					if (rule)
 						return rule.style.getPropertyValue("-webkit-mask-image") || rule.style.getPropertyValue("mask-image") || "";
-					}
 				}
 				return null;
 			};
@@ -89,6 +91,7 @@ test.describe("Settings navigation", () => {
 		{ id: "environment", heading: "Environment" },
 		{ id: "crons", heading: "Cron Jobs" },
 		{ id: "voice", heading: "Voice" },
+		{ id: "phone", heading: "Phone" },
 		{ id: "security", heading: "Security" },
 		{ id: "ssh", heading: "SSH" },
 		{ id: "remote-access", heading: "Remote Access" },
@@ -135,61 +138,8 @@ test.describe("Settings navigation", () => {
 			.first();
 		await expect(whisperRow).toBeVisible();
 
-		await page.evaluate(async () => {
-			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app.js script not found");
-			const appUrl = new URL(appScript.src, window.location.origin).href;
-			const marker = "js/app.js";
-			const markerIdx = appUrl.indexOf(marker);
-			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
-			const prefix = appUrl.slice(0, markerIdx);
-			const state = await import(`${prefix}js/state.js`);
-			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
-			window.__voiceSettingsSaveSettingsRequest = null;
-			state.setConnected(true);
-			state.setWs({
-				readyState: wsOpen,
-				send(raw) {
-					const req = JSON.parse(raw || "{}");
-					const resolver = state.pending[req.id];
-					if (!resolver) return;
-					if (req.method === "voice.config.save_settings") {
-						window.__voiceSettingsSaveSettingsRequest = req.params || null;
-						resolver({ ok: true, payload: { ok: true } });
-					} else if (req.method === "voice.providers.all") {
-						resolver({
-							ok: true,
-							payload: {
-								stt: [
-									{
-										id: "whisper",
-										name: "OpenAI Whisper",
-										type: "stt",
-										category: "cloud",
-										description: "Best accuracy, handles accents and background noise",
-										available: true,
-										enabled: false,
-										keySource: "config",
-										settings: { baseUrl: "http://127.0.0.1:8001/v1" },
-										capabilities: { baseUrl: true },
-									},
-								],
-								tts: [],
-							},
-						});
-					} else {
-						resolver({
-							ok: false,
-							error: { message: `unexpected rpc in voice settings test: ${req.method}` },
-						});
-					}
-					delete state.pending[req.id];
-				},
-			});
-		});
-
 		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
-		const modal = page
+		let modal = page
 			.locator(".modal-box")
 			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
 			.last();
@@ -197,13 +147,15 @@ test.describe("Settings navigation", () => {
 		await modal.locator('input[data-field="baseUrl"]').fill("http://127.0.0.1:8001/v1");
 		await modal.getByRole("button", { name: "Save", exact: true }).click();
 
-		await expect.poll(() => page.evaluate(() => window.__voiceSettingsSaveSettingsRequest)).not.toBeNull();
+		await expect(modal).toBeHidden();
 
-		const sentRequest = await page.evaluate(() => window.__voiceSettingsSaveSettingsRequest);
-		expect(sentRequest).toMatchObject({
-			provider: "whisper",
-			baseUrl: "http://127.0.0.1:8001/v1",
-		});
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await expect(modal.locator('input[data-field="baseUrl"]')).toHaveValue("http://127.0.0.1:8001/v1");
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -218,68 +170,6 @@ test.describe("Settings navigation", () => {
 			.first();
 		await expect(whisperRow).toBeVisible();
 
-		await page.evaluate(async () => {
-			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app.js script not found");
-			const appUrl = new URL(appScript.src, window.location.origin).href;
-			const marker = "js/app.js";
-			const markerIdx = appUrl.indexOf(marker);
-			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
-			const prefix = appUrl.slice(0, markerIdx);
-			const state = await import(`${prefix}js/state.js`);
-			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
-			window.__voiceSettingsCurrentBaseUrl = null;
-			window.__voiceSettingsRequests = [];
-			window.__voiceSettingsClearBaseUrlRequest = null;
-			window.__voiceSettingsProvidersAllRequests = 0;
-			state.setConnected(true);
-			state.setWs({
-				readyState: wsOpen,
-				send(raw) {
-					const req = JSON.parse(raw || "{}");
-					const resolver = state.pending[req.id];
-					if (!resolver) return;
-					if (req.method === "voice.config.save_settings") {
-						window.__voiceSettingsRequests.push(req.params || null);
-						window.__voiceSettingsCurrentBaseUrl =
-							typeof req.params?.baseUrl === "string" ? req.params.baseUrl : window.__voiceSettingsCurrentBaseUrl;
-						if (req.params?.baseUrl === "") {
-							window.__voiceSettingsClearBaseUrlRequest = req.params || null;
-						}
-						resolver({ ok: true, payload: { ok: true } });
-					} else if (req.method === "voice.providers.all") {
-						window.__voiceSettingsProvidersAllRequests += 1;
-						resolver({
-							ok: true,
-							payload: {
-								stt: [
-									{
-										id: "whisper",
-										name: "OpenAI Whisper",
-										type: "stt",
-										category: "cloud",
-										description: "Best accuracy, handles accents and background noise",
-										available: true,
-										enabled: false,
-										keySource: "config",
-										settings: { baseUrl: window.__voiceSettingsCurrentBaseUrl || "" },
-										capabilities: { baseUrl: true },
-									},
-								],
-								tts: [],
-							},
-						});
-					} else {
-						resolver({
-							ok: false,
-							error: { message: `unexpected rpc in voice settings clear-base-url test: ${req.method}` },
-						});
-					}
-					delete state.pending[req.id];
-				},
-			});
-		});
-
 		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
 		let modal = page
 			.locator(".modal-box")
@@ -289,8 +179,7 @@ test.describe("Settings navigation", () => {
 		await modal.locator('input[data-field="baseUrl"]').fill("http://127.0.0.1:8001/v1");
 		await modal.getByRole("button", { name: "Save", exact: true }).click();
 
-		await expect.poll(() => page.evaluate(() => window.__voiceSettingsRequests.length)).toBeGreaterThan(0);
-		await expect.poll(() => page.evaluate(() => window.__voiceSettingsProvidersAllRequests)).toBeGreaterThan(0);
+		await expect(modal).toBeHidden();
 
 		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
 		modal = page
@@ -302,13 +191,15 @@ test.describe("Settings navigation", () => {
 		await modal.locator('input[data-field="baseUrl"]').fill("");
 		await modal.getByRole("button", { name: "Save", exact: true }).click();
 
-		await expect.poll(() => page.evaluate(() => window.__voiceSettingsClearBaseUrlRequest)).not.toBeNull();
+		await expect(modal).toBeHidden();
 
-		const sentRequest = await page.evaluate(() => window.__voiceSettingsClearBaseUrlRequest);
-		expect(sentRequest).toMatchObject({
-			provider: "whisper",
-			baseUrl: "",
-		});
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		modal = page
+			.locator(".modal-box")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: false }) })
+			.last();
+		await expect(modal).toBeVisible();
+		await expect(modal.locator('input[data-field="baseUrl"]')).toHaveValue("");
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -427,9 +318,10 @@ test.describe("Settings navigation", () => {
 		// Re-navigate so ConnectNodeForm re-renders with the spoofed gon port.
 		await navigateAndWait(page, "/settings/nodes");
 
-		const endpointCode = page.locator("code").filter({ hasText: /^wss?:\/\// });
+		const endpointCode = page.locator("code").filter({ hasText: /^moltis node add --host wss?:\/\// });
 		await expect(endpointCode).toBeVisible();
-		const wsUrl = (await endpointCode.textContent()).trim();
+		const endpointText = (await endpointCode.textContent()).trim();
+		const wsUrl = endpointText.replace(/^moltis node add --host\s+/, "");
 
 		// The URL must use the browser's port (location.port), NOT the spoofed
 		// gon port 99999 — proving we are immune to the behind-proxy bug (#426).
@@ -720,7 +612,8 @@ test.describe("Settings navigation", () => {
 		await expect(page.locator(".settings-group-label").nth(3)).toHaveText("Systems");
 
 		const navItems = (await page.locator(".settings-nav-item").allTextContents()).map((text) => text.trim());
-		const expectedPrefix = [
+		const presentOptionalItems = (items) => items.filter((item) => navItems.includes(item));
+		const expected = [
 			"User Profile",
 			"Agents",
 			"Nodes",
@@ -732,10 +625,7 @@ test.describe("Settings navigation", () => {
 			"Webhooks",
 			"Heartbeat",
 			"Authentication",
-		];
-		if (navItems.includes("Encryption")) expectedPrefix.push("Encryption");
-		if (navItems.includes("SSH")) expectedPrefix.push("SSH");
-		expectedPrefix.push(
+			...presentOptionalItems(["Encryption", "SSH"]),
 			"Remote Access",
 			"Network Audit",
 			"Sandboxes",
@@ -745,15 +635,14 @@ test.describe("Settings navigation", () => {
 			"Tools",
 			"MCP",
 			"Skills",
-		);
-		if (navItems.includes("Imports")) expectedPrefix.push("Imports");
-		const expectedSystem = ["Terminal", "Monitoring", "Logs"];
-		const expected = [...expectedPrefix];
-		if (navItems.includes("OpenClaw Import")) expected.push("OpenClaw Import");
-		if (navItems.includes("Voice")) expected.push("Voice");
-		expected.push(...expectedSystem);
-		if (navItems.includes("GraphQL")) expected.push("GraphQL");
-		expected.push("Configuration");
+			...presentOptionalItems(["Imports"]),
+			...presentOptionalItems(["OpenClaw Import", "Voice", "Phone"]),
+			"Terminal",
+			"Monitoring",
+			"Logs",
+			...presentOptionalItems(["GraphQL"]),
+			"Configuration",
+		];
 		expect(navItems).toEqual(expected);
 
 		await expect(page.locator('.settings-nav-item[data-section="providers"]')).toHaveText("LLMs");

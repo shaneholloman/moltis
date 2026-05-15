@@ -1,4 +1,4 @@
-use std::pin::Pin;
+use std::{pin::Pin, time::Duration};
 
 use {
     async_trait::async_trait,
@@ -10,7 +10,8 @@ use {
 use tracing::debug;
 
 use crate::{
-    context_window_for_model_with_config, supports_tools_for_model, supports_vision_for_model,
+    context_window_for_model_with_config, http::retry_after_ms_from_headers,
+    supports_tools_for_model, supports_vision_for_model,
 };
 
 use moltis_agents::model::{
@@ -138,12 +139,113 @@ impl OpenAiProvider {
         self
     }
 
+    fn is_deepseek_provider(&self) -> bool {
+        self.provider_name.eq_ignore_ascii_case("deepseek")
+            || self
+                .base_url
+                .to_ascii_lowercase()
+                .contains("api.deepseek.com")
+    }
+
+    fn is_mistral_provider(&self) -> bool {
+        self.provider_name.eq_ignore_ascii_case("mistral")
+            || self.base_url.to_ascii_lowercase().contains("mistral.ai")
+    }
+
+    async fn wait_for_mistral_slot(&self) {
+        if !self.is_mistral_provider() {
+            return;
+        }
+
+        static LAST_MISTRAL_REQUEST: std::sync::OnceLock<
+            tokio::sync::Mutex<Option<tokio::time::Instant>>,
+        > = std::sync::OnceLock::new();
+        const MIN_INTERVAL: Duration = Duration::from_millis(1_250);
+
+        let mut last_request = LAST_MISTRAL_REQUEST
+            .get_or_init(|| tokio::sync::Mutex::new(None))
+            .lock()
+            .await;
+
+        if let Some(last) = *last_request {
+            let next_allowed = last + MIN_INTERVAL;
+            if next_allowed > tokio::time::Instant::now() {
+                tokio::time::sleep_until(next_allowed).await;
+            }
+        }
+        *last_request = Some(tokio::time::Instant::now());
+    }
+
+    fn mistral_retry_delay(
+        &self,
+        attempt: usize,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Option<Duration> {
+        if !self.is_mistral_provider() || attempt >= 2 {
+            return None;
+        }
+
+        let retry_after = retry_after_ms_from_headers(headers)
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_secs(2_u64.saturating_pow(attempt as u32)));
+        Some(retry_after.min(Duration::from_secs(30)))
+    }
+
+    pub(crate) async fn send_chat_completions_request(
+        &self,
+        body: &serde_json::Value,
+    ) -> reqwest::Result<reqwest::Response> {
+        for attempt in 0..3 {
+            self.wait_for_mistral_slot().await;
+
+            let response = self
+                .client
+                .post(format!("{}/chat/completions", self.base_url))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", self.api_key.expose_secret()),
+                )
+                .header("content-type", "application/json")
+                .json(body)
+                .send()
+                .await?;
+
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                && let Some(delay) = self.mistral_retry_delay(attempt, response.headers())
+            {
+                tracing::debug!(
+                    provider = %self.provider_name,
+                    model = %self.model,
+                    attempt = attempt + 1,
+                    delay_ms = delay.as_millis(),
+                    "retrying Mistral request after rate limit"
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+
+            return Ok(response);
+        }
+
+        unreachable!("bounded retry loop always returns from the final attempt")
+    }
+
     /// Return the reasoning effort string if configured.
     ///
     /// OpenAI accepts `"low"`, `"medium"`, `"high"`. Levels outside that range
     /// are clamped to the nearest supported value.
     pub(crate) fn reasoning_effort_str(&self) -> Option<&'static str> {
         use moltis_agents::model::ReasoningEffort;
+        if self.is_deepseek_provider() {
+            return self.reasoning_effort.map(|e| match e {
+                ReasoningEffort::Minimal
+                | ReasoningEffort::Low
+                | ReasoningEffort::Medium
+                | ReasoningEffort::High => "high",
+                ReasoningEffort::ExtraHigh => "max",
+            });
+        }
+
         self.reasoning_effort.map(|e| match e {
             ReasoningEffort::Minimal => {
                 tracing::debug!(
@@ -172,6 +274,9 @@ impl OpenAiProvider {
     pub(crate) fn apply_reasoning_effort_chat(&self, body: &mut serde_json::Value) {
         if let Some(effort) = self.reasoning_effort_str() {
             body["reasoning_effort"] = serde_json::json!(effort);
+            if self.is_deepseek_provider() {
+                body["thinking"] = serde_json::json!({ "type": "enabled" });
+            }
         }
     }
 
@@ -344,7 +449,7 @@ impl LlmProvider for OpenAiProvider {
         }
     }
 
-    fn probe_timeout(&self) -> std::time::Duration {
+    fn probe_timeout(&self) -> Duration {
         self.probe_timeout_duration()
     }
 

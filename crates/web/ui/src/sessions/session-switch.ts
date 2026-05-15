@@ -1,6 +1,6 @@
 // ── Session switching: switch, restore, refresh ─────────────────
 
-import { chatAddMsg, removeThinking, updateCommandInputUI, updateTokenBar } from "../chat-ui";
+import { chatAddMsg, removeThinking, setComposerStopButton, updateCommandInputUI, updateTokenBar } from "../chat-ui";
 import { sendRpc } from "../helpers";
 import { restoreNodeSelection } from "../nodes-selector";
 import { updateSessionProjectSelect } from "../project-combo";
@@ -114,6 +114,7 @@ export function restoreSessionState(entry: SessionMeta, projectId?: string): voi
 	}
 	updateSandboxUI(entry.sandbox_enabled !== false);
 	updateSandboxImageUI(entry.sandbox_image || null);
+	S.setSessionSandboxBackend(entry.sandbox_backend || null);
 	const sandboxRuntimeAvailable = ((S.sandboxInfo as SandboxInfoPayload | null)?.backend || "none") !== "none";
 	const effectiveSandboxRoute = entry.sandbox_enabled !== false && sandboxRuntimeAvailable;
 	S.setSessionExecMode(effectiveSandboxRoute ? "sandbox" : "host");
@@ -164,7 +165,9 @@ function resetSwitchViewState(): void {
 	S.setLastHistoryIndex(-1);
 	S.setSessionTokens({ input: 0, output: 0 });
 	S.setSessionCurrentInputTokens(0);
+	S.setSessionCurrentContextTokens(0);
 	S.setSessionContextWindow(0);
+	setComposerStopButton(false);
 	updateTokenBar();
 }
 
@@ -202,6 +205,9 @@ function applyReplyingStateFromSwitchPayload(key: string, payload: SwitchPayload
 	if (!replying && key === sessionStore.activeSessionKey.value) {
 		removeThinking();
 	}
+	if (key === sessionStore.activeSessionKey.value) {
+		setComposerStopButton(replying, key);
+	}
 }
 
 /** Clear history for the currently active session and reset local UI state. */
@@ -215,6 +221,7 @@ export function clearActiveSession(): Promise<RpcResponse> {
 			if (S.chatMsgBox) S.chatMsgBox.textContent = "";
 			S.setSessionTokens({ input: 0, output: 0 });
 			S.setSessionCurrentInputTokens(0);
+			S.setSessionCurrentContextTokens(0);
 			updateTokenBar();
 			const activeKey = sessionStore.activeSessionKey.value || S.activeSessionKey;
 			// Inline markSessionLocallyCleared to avoid circular import

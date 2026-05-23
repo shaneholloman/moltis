@@ -70,6 +70,60 @@ fn tools_loop_detector_window_defaults_to_two() {
 }
 
 #[test]
+fn cloudflare_tunnel_config_defaults_to_disabled() {
+    let config: MoltisConfig = toml::from_str("").unwrap();
+    assert!(!config.cloudflare_tunnel.enabled);
+    assert!(config.cloudflare_tunnel.token.is_none());
+    assert!(config.cloudflare_tunnel.hostname.is_none());
+}
+
+#[test]
+fn cloudflare_tunnel_config_parses_token_and_hostname() {
+    let config: MoltisConfig = toml::from_str(
+        r#"
+[cloudflare_tunnel]
+enabled = true
+token = "cf-token"
+hostname = "moltis.example.com"
+"#,
+    )
+    .unwrap();
+
+    assert!(config.cloudflare_tunnel.enabled);
+    assert_eq!(
+        config
+            .cloudflare_tunnel
+            .token
+            .as_ref()
+            .map(Secret::expose_secret),
+        Some(&"cf-token".to_string())
+    );
+    assert_eq!(
+        config.cloudflare_tunnel.hostname.as_deref(),
+        Some("moltis.example.com")
+    );
+}
+
+#[test]
+fn netbird_config_defaults_to_off() {
+    let config: MoltisConfig = toml::from_str("").unwrap();
+    assert_eq!(config.netbird.mode, "off");
+}
+
+#[test]
+fn netbird_config_parses_serve_mode() {
+    let config: MoltisConfig = toml::from_str(
+        r#"
+[netbird]
+mode = "serve"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(config.netbird.mode, "serve");
+}
+
+#[test]
 fn env_section_parses() {
     let toml = r#"
 [env]
@@ -192,6 +246,33 @@ request_timeout_secs = 75
             .and_then(|entry| entry.request_timeout_secs),
         Some(75)
     );
+}
+
+#[test]
+fn mcp_oauth_override_parses_client_secret_as_secret() {
+    let config: MoltisConfig = toml::from_str(
+        r#"
+[mcp.servers.hubspot]
+url = "https://mcp.hubspot.com"
+transport = "streamable-http"
+
+[mcp.servers.hubspot.oauth]
+client_id = "client-id"
+client_secret = "client-secret"
+auth_url = "https://mcp.hubspot.com/oauth/authorize/user"
+token_url = "https://mcp.hubspot.com/oauth/v3/token"
+"#,
+    )
+    .unwrap();
+
+    let secret = config
+        .mcp
+        .servers
+        .get("hubspot")
+        .and_then(|entry| entry.oauth.as_ref())
+        .and_then(|oauth| oauth.client_secret.as_ref())
+        .map(ExposeSecret::expose_secret);
+    assert_eq!(secret.map(String::as_str), Some("client-secret"));
 }
 
 #[test]

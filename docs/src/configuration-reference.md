@@ -143,6 +143,7 @@ Authentication configuration.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `disabled` | bool | `false` | When `true`, authentication is explicitly disabled (no login required). |
+| `vault_enabled` | bool | `true` | When `true`, stored secrets are encrypted at rest using the password-backed vault. Set `false` to keep password auth without vault unlocks after restart. |
 
 
 ### `tls` — TlsConfig
@@ -151,11 +152,12 @@ TLS configuration for the gateway HTTPS server.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | `true` | Enable HTTPS with auto-generated certificates. |
-| `auto_generate` | bool | `true` | Auto-generate a local CA and server certificate on first run. |
+| `enabled` | bool | `true` | Enable HTTPS. Auto-generated certificates are local/private-network certificates, not public CA certificates. |
+| `auto_generate` | bool | `true` | Auto-generate a local CA and server certificate on first run. The generated certificate is only valid for names/IPs included in its SAN list. |
 | `cert_path` | optional string | — | Path to a custom server certificate (PEM). Overrides auto-generation. |
 | `key_path` | optional string | — | Path to a custom server private key (PEM). Overrides auto-generation. |
 | `ca_cert_path` | optional string | — | Path to the CA certificate (PEM) used for trust instructions. |
+| `public_ip` | optional string | — | Public IPv4 or IPv6 address to include as an IP SAN in auto-generated certificates. Use this for direct `https://<public-ip>` access after trusting Moltis' local CA. |
 | `http_redirect_port` | optional integer | — | Port for the plain-HTTP redirect/CA-download server. Defaults to the gateway port + 1 when not set. |
 
 
@@ -179,6 +181,17 @@ ngrok public HTTPS tunnel configuration.
 | `domain` | optional string | — | Optional reserved/static domain to request from ngrok. |
 
 
+### `cloudflare_tunnel` — CloudflareTunnelConfig
+
+Cloudflare Tunnel public HTTPS connector configuration.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Whether the Cloudflare Tunnel connector is enabled. |
+| `token` | optional secret string | — | Cloudflare Tunnel token. If unset, `CLOUDFLARE_TUNNEL_TOKEN` env var is used. |
+| `hostname` | optional string | — | Optional public hostname for status display and WebAuthn origin updates. |
+
+
 ### `tailscale` — TailscaleConfig
 
 Tailscale Serve/Funnel configuration.
@@ -187,6 +200,15 @@ Tailscale Serve/Funnel configuration.
 |---|---|---|---|
 | `mode` | string | `"off"` | Tailscale mode: `"off"`, `"serve"`, or `"funnel"`. |
 | `reset_on_exit` | bool | `true` | Reset tailscale serve/funnel when the gateway shuts down. |
+
+
+### `netbird` — NetbirdConfig
+
+NetBird private mesh access configuration.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `mode` | string | `"off"` | NetBird mode: `"off"` or `"serve"`. |
 
 
 ### `upstream_proxy` (top-level scalar)
@@ -386,7 +408,7 @@ not create chat agents, change memory, or affect `spawn_agent` presets.
 | `mode` | string | `"all"` | When sandboxing is active (`"all"`, `"auto"`, `"off"`). |
 | `scope` | string | `"session"` | Container lifetime (`"session"` or `"per-command"`). |
 | `workspace_mount` | string | `"ro"` | Workspace mount mode (`"ro"`, `"rw"`, `"none"`). |
-| `host_data_dir` | optional string | `null` | Host-visible path for Moltis `data_dir()` when creating sandbox containers from inside another container. |
+| `host_data_dir` | optional string | `null` | Host-visible path for Moltis `data_dir()` when creating sandbox or browser containers from inside another container. |
 | `home_persistence` | enum: `"off"`, `"session"`, `"shared"` | `"shared"` | Persistence strategy for `/home/sandbox` in sandbox containers. |
 | `shared_home_dir` | optional string | `null` | Host directory for shared `/home/sandbox` persistence. Relative paths resolved against `data_dir()`. |
 | `image` | optional string | `null` | Docker/Podman image for sandbox containers. |
@@ -671,6 +693,7 @@ Each channel account (`channels.<channel_type>.<account_name>`) is an arbitrary 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `client_id` | string | *(required)* | The OAuth client ID. |
+| `client_secret` | optional string | `None` | Optional OAuth client secret sent to the token endpoint. |
 | `auth_url` | string | *(required)* | The authorization endpoint URL. |
 | `token_url` | string | *(required)* | The token endpoint URL. |
 | `scopes` | array of string | `[]` | OAuth scopes to request. |

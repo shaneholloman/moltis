@@ -19,6 +19,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260523.01] - 2026-05-23
+### Added
+- [openai-codex] Add reasoning effort support (#1005)
+
+
+### Removed
+- [gateway] Remove needless return
+
+
+### Fixed
+- [vault] Keep auth password changes in sync (#1026)
+- [sandbox] Auto-detect docker host data mounts (#1035)
+- [e2e] Wait for new chat sessions to settle
+- [telephony] Dispatch Twilio gather speech (#1034)
+- Fix sandbox media file reads in Docker (#1040)
+- [gateway] Use mp3 for chat voice generation (#1041)
+- [voice] Return wav metadata for piper audio (#1043)
+
+## [20260519.01] - 2026-05-19
+### Fixed
+- [web] Avoid false websocket disconnect timeouts (#1023)
+- [sandbox] Reap docker sandbox zombies (#1025)
+- [ci] Avoid slow session cleanup in e2e
+
+## [20260518.01] - 2026-05-18
+### Fixed
+- [ci] Drain fake claude stdin in coverage test
+- [config] Preserve explicit defaults on startup (#1015)
+- [agents] Honor BeforeLLMCall hook modifications (#1018)
+- [providers] Parse thought reasoning tags (#1016)
+- [agents] Dispatch before agent start hooks (#1017)
+- [tools] Ignore heredoc bodies in dangerous command scan (#1019)
+- [ci] Allowlist oversized files for decomposition
+- [sandbox] Update slacrawl go module path (#1021)
+
+## [20260517.03] - 2026-05-17
+### Fixed
+- [ci] Stabilize external agent e2e binding
+
+## [20260517.02] - 2026-05-17
+### Fixed
+- [ci] Stabilize release e2e specs
+
+## [20260517.01] - 2026-05-17
+### Added
+- [tls] Support public IP SAN for generated certs (#1000)
+- [mcp] Support OAuth client secrets (#1001)
+- [remote-access] Add NetBird and Cloudflare Tunnel support (#1002)
+- [external-agents] Add persistent agent sessions (#566)
+- Add NetBird and Cloudflare Tunnel to onboarding (#1008)
+
+
+### Fixed
+- [providers] Retry mistral rate limits
+- [ci] Stabilize e2e module shims
+- [ci] Wait for autoscroll test position
+- [sandbox] Update discrawl module path (#989)
+- [release] Classify plain merge titles
+- [ci] Repair autoscroll fixture overflow
+- [providers] Normalize nullable tool arguments
+- [providers] Harden live integration checks
+- [install] Avoid Proxmox Docker prompt failure (#992)
+- [ci] Stabilize token bar e2e assertion
+- [install] Tolerate missing Proxmox CA cert (#997)
+- [web] Prevent chat composer horizontal overflow (#998)
+- [ci] Restore docs and app validation
+- [ci] Stabilize chat autoscroll e2e
+- [ci] Correct codex tracing skip parameter
+
 ## [20260510.01] - 2026-05-10
 ### Fixed
 - [release] Avoid large blob arguments

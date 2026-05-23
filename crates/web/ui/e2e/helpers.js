@@ -233,8 +233,12 @@ async function waitForChatSessionReady(page) {
 	await page.waitForFunction(
 		async () => {
 			var store = window.__moltis_stores?.sessionStore;
+			var activeKey = store?.activeSessionKey?.value || "";
+			if (!(activeKey && store?.getByKey?.(activeKey))) return false;
 			if (store?.switchInProgress?.value) return false;
 			if (document.getElementById("sessionLoadIndicator")) return false;
+			if (document.querySelector(`.session-item.active.loading[data-session-key="${CSS.escape(activeKey)}"]`))
+				return false;
 			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
 			if (!appScript) return false;
 			var appUrl = new URL(appScript.src, window.location.origin);

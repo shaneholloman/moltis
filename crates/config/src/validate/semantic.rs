@@ -171,6 +171,37 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
             message: "tls.key_path is set but tls.cert_path is missing".into(),
         });
     }
+    if let Some(public_ip) = config.tls.public_ip.as_deref() {
+        match public_ip.parse::<std::net::IpAddr>() {
+            Ok(ip) if ip.is_loopback() || ip.is_unspecified() => {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    category: "security",
+                    path: "tls.public_ip".into(),
+                    message: "tls.public_ip is a loopback or unspecified address and will not be useful as a public IP SAN".into(),
+                });
+            },
+            Ok(_) => {},
+            Err(_) => {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "security",
+                    path: "tls.public_ip".into(),
+                    message: "tls.public_ip must be an IPv4 or IPv6 address".into(),
+                });
+            },
+        }
+
+        if has_cert && has_key {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                category: "security",
+                path: "tls.public_ip".into(),
+                message: "tls.public_ip has no effect when tls.cert_path and tls.key_path are set"
+                    .into(),
+            });
+        }
+    }
 
     // Sandbox mode off
     if config.tools.exec.sandbox.mode == "off" {
@@ -500,6 +531,25 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
         }
     }
 
+    let valid_agent_kinds = ["claude-code", "opencode", "codex", "pi-agent", "acp"];
+    for agent_kind in config.external_agents.agents.keys() {
+        if !valid_agent_kinds.contains(&agent_kind.as_str()) {
+            let suggestion = suggest(agent_kind, &valid_agent_kinds, 3)
+                .map(|candidate| format!(" Did you mean \"{candidate}\"?"))
+                .unwrap_or_default();
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                category: "unknown-field",
+                path: format!("external_agents.agents.{agent_kind}"),
+                message: format!(
+                    "unknown external agent kind \"{agent_kind}\"; expected one of: {}.{}",
+                    valid_agent_kinds.join(", "),
+                    suggestion
+                ),
+            });
+        }
+    }
+
     // Unknown tailscale mode
     let valid_ts_modes = ["off", "serve", "funnel"];
     if !valid_ts_modes.contains(&config.tailscale.mode.as_str()) {
@@ -515,12 +565,44 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
         });
     }
 
+    let valid_netbird_modes = ["off", "serve"];
+    if !valid_netbird_modes.contains(&config.netbird.mode.as_str()) {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Warning,
+            category: "unknown-field",
+            path: "netbird.mode".into(),
+            message: format!(
+                "unknown netbird mode \"{}\"; expected one of: {}",
+                config.netbird.mode,
+                valid_netbird_modes.join(", ")
+            ),
+        });
+    }
+
+    if config.netbird.mode == "serve" && config.auth.disabled {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Warning,
+            category: "security",
+            path: "netbird.mode".into(),
+            message: "NetBird serve mode is enabled while auth.disabled is true; NetBird mesh peers will be blocked with setup required until authentication is configured".into(),
+        });
+    }
+
     if config.ngrok.enabled && config.auth.disabled {
         diagnostics.push(Diagnostic {
             severity: Severity::Warning,
             category: "security",
             path: "ngrok.enabled".into(),
             message: "ngrok is enabled while auth.disabled is true; remote visitors will be blocked with setup required until authentication is configured".into(),
+        });
+    }
+
+    if config.cloudflare_tunnel.enabled && config.auth.disabled {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Warning,
+            category: "security",
+            path: "cloudflare_tunnel.enabled".into(),
+            message: "Cloudflare Tunnel is enabled while auth.disabled is true; remote visitors will be blocked with setup required until authentication is configured".into(),
         });
     }
 

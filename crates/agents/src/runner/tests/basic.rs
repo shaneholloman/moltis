@@ -10,7 +10,7 @@ use {
     },
     anyhow::Result,
     async_trait::async_trait,
-    moltis_common::hooks::HookRegistry,
+    moltis_common::hooks::{HookAction, HookEvent, HookHandler, HookPayload, HookRegistry},
     std::pin::Pin,
     tokio_stream::Stream,
 };
@@ -135,6 +135,199 @@ async fn test_simple_text_response() {
     assert_eq!(result.tool_calls_made, 0);
 }
 
+#[tokio::test]
+async fn test_non_streaming_runner_dispatches_before_agent_start_hook() {
+    let provider = Arc::new(MockProvider {
+        response_text: "Hello!".into(),
+    });
+    let tools = ToolRegistry::new();
+    let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut hooks = HookRegistry::new();
+    hooks.register(Arc::new(AgentStartRecordingHook {
+        payloads: Arc::clone(&payloads),
+    }));
+
+    let result = run_agent_loop_with_context(
+        provider,
+        &tools,
+        "You are a test bot.",
+        &UserContent::text("Hi"),
+        None,
+        None,
+        Some(serde_json::json!({"_session_key": "session-123"})),
+        Some(Arc::new(hooks)),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.text, "Hello!");
+    let payloads = payloads.lock().unwrap();
+    assert_eq!(payloads.len(), 1);
+    assert!(matches!(
+        &payloads[0],
+        HookPayload::BeforeAgentStart { session_key, model }
+            if session_key == "session-123" && model == "mock-model"
+    ));
+}
+
+struct InjectBeforeLlmSystemHook;
+
+#[async_trait]
+impl HookHandler for InjectBeforeLlmSystemHook {
+    fn name(&self) -> &str {
+        "inject-before-llm-system-hook"
+    }
+
+    fn events(&self) -> &[HookEvent] {
+        static EVENTS: [HookEvent; 1] = [HookEvent::BeforeLLMCall];
+        &EVENTS
+    }
+
+    async fn handle(
+        &self,
+        _event: HookEvent,
+        payload: &HookPayload,
+    ) -> moltis_common::error::Result<HookAction> {
+        let HookPayload::BeforeLLMCall { messages, .. } = payload else {
+            return Ok(HookAction::Continue);
+        };
+        let mut messages = messages.as_array().cloned().unwrap_or_default();
+        messages.insert(
+            0,
+            serde_json::json!({"role": "system", "content": "hook-injected system"}),
+        );
+        Ok(HookAction::ModifyPayload(
+            serde_json::json!({"messages": messages}),
+        ))
+    }
+}
+
+struct RecordingMessagesProvider {
+    messages: Arc<std::sync::Mutex<Vec<ChatMessage>>>,
+}
+
+#[async_trait]
+impl LlmProvider for RecordingMessagesProvider {
+    fn name(&self) -> &str {
+        "recording-messages"
+    }
+
+    fn id(&self) -> &str {
+        "recording-messages-model"
+    }
+
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> Result<CompletionResponse> {
+        *self.messages.lock().unwrap() = messages.to_vec();
+        Ok(CompletionResponse {
+            text: Some("ok".into()),
+            tool_calls: vec![],
+            usage: Usage::default(),
+        })
+    }
+
+    fn stream(
+        &self,
+        _messages: Vec<ChatMessage>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        Box::pin(tokio_stream::empty())
+    }
+
+    fn stream_with_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        *self.messages.lock().unwrap() = messages;
+        Box::pin(tokio_stream::iter(vec![StreamEvent::Delta("ok".into())]))
+    }
+}
+
+#[tokio::test]
+async fn test_before_llm_call_modify_payload_updates_non_streaming_messages() {
+    let recorded_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = Arc::new(RecordingMessagesProvider {
+        messages: Arc::clone(&recorded_messages),
+    });
+    let tools = ToolRegistry::new();
+    let mut hooks = HookRegistry::new();
+    hooks.register(Arc::new(InjectBeforeLlmSystemHook));
+
+    let result = run_agent_loop_with_context(
+        provider,
+        &tools,
+        "original system",
+        &UserContent::text("hello"),
+        None,
+        None,
+        None,
+        Some(Arc::new(hooks)),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.text, "ok");
+    let messages = recorded_messages.lock().unwrap();
+    assert!(matches!(
+        messages.first(),
+        Some(ChatMessage::System { content }) if content == "hook-injected system"
+    ));
+}
+
+#[tokio::test]
+async fn test_before_llm_call_modify_payload_updates_streaming_messages() {
+    let recorded_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = Arc::new(RecordingMessagesProvider {
+        messages: Arc::clone(&recorded_messages),
+    });
+    let tools = ToolRegistry::new();
+    let mut hooks = HookRegistry::new();
+    hooks.register(Arc::new(InjectBeforeLlmSystemHook));
+
+    let result = run_agent_loop_streaming(
+        provider,
+        &tools,
+        "original system",
+        &UserContent::text("hello"),
+        None,
+        None,
+        None,
+        Some(Arc::new(hooks)),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.text, "ok");
+    let messages = recorded_messages.lock().unwrap();
+    assert!(matches!(
+        messages.first(),
+        Some(ChatMessage::System { content }) if content == "hook-injected system"
+    ));
+}
+
+#[test]
+fn test_before_llm_call_modify_payload_keeps_original_when_invalid() {
+    let mut messages = vec![ChatMessage::system("original system")];
+
+    apply_before_llm_call_modify_payload(
+        &mut messages,
+        serde_json::json!({"messages": [{"role": "invalid", "content": "ignored"}]}),
+    );
+
+    assert_eq!(messages.len(), 1);
+    assert!(matches!(
+        messages.first(),
+        Some(ChatMessage::System { content }) if content == "original system"
+    ));
+}
+
 struct StreamingUsageProvider;
 
 #[async_trait]
@@ -215,6 +408,41 @@ async fn test_streaming_runner_preserves_cache_usage() {
     assert_eq!(result.request_usage.output_tokens, 17);
     assert_eq!(result.request_usage.cache_read_tokens, 12_800);
     assert_eq!(result.request_usage.cache_write_tokens, 64);
+}
+
+#[tokio::test]
+async fn test_streaming_runner_dispatches_before_agent_start_hook() {
+    let provider = Arc::new(StreamingUsageProvider);
+    let tools = ToolRegistry::new();
+    let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut hooks = HookRegistry::new();
+    hooks.register(Arc::new(AgentStartRecordingHook {
+        payloads: Arc::clone(&payloads),
+    }));
+
+    let result = run_agent_loop_streaming(
+        provider,
+        &tools,
+        "You are a test bot.",
+        &UserContent::text("Hi"),
+        None,
+        None,
+        Some(serde_json::json!({"_session_key": "stream-session-123"})),
+        Some(Arc::new(hooks)),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.text, "cached reply");
+    let payloads = payloads.lock().unwrap();
+    assert_eq!(payloads.len(), 1);
+    assert!(matches!(
+        &payloads[0],
+        HookPayload::BeforeAgentStart { session_key, model }
+            if session_key == "stream-session-123" && model == "streaming-usage-model"
+    ));
 }
 
 struct NonStreamingUsageProvider {
@@ -1249,202 +1477,4 @@ fn test_extract_images_in_json_context() {
     assert!(remaining.contains("screenshot"));
     assert!(remaining.contains("success"));
     assert!(!remaining.contains(&payload));
-}
-
-#[test]
-fn test_tool_result_to_content_openai_format() {
-    let payload = "A".repeat(300);
-    let input = format!("Text: data:image/png;base64,{payload}");
-    let result = tool_result_to_content(&input, 50_000, true);
-    let arr = result.as_array().unwrap();
-    assert_eq!(arr[0]["type"], "text");
-    assert!(arr[0]["text"].is_string());
-    assert_eq!(arr[1]["type"], "image_url");
-    assert!(arr[1]["image_url"].is_object());
-    assert!(arr[1]["image_url"]["url"].is_string());
-    let url = arr[1]["image_url"]["url"].as_str().unwrap();
-    assert!(url.starts_with("data:image/png;base64,"));
-}
-
-#[test]
-fn test_tool_result_to_content_truncation() {
-    let payload = "A".repeat(300);
-    let long_text = "X".repeat(10_000);
-    let input = format!("{long_text} data:image/png;base64,{payload}");
-    let result = tool_result_to_content(&input, 500, true);
-    let arr = result.as_array().unwrap();
-    let text = arr[0]["text"].as_str().unwrap();
-    assert!(
-        text.contains("[truncated"),
-        "text should be truncated: {text}"
-    );
-    assert_eq!(arr[1]["type"], "image_url");
-}
-
-// ── sanitize_tool_name ────────────────────────────────────────────
-
-#[test]
-fn sanitize_tool_name_clean_input() {
-    assert_eq!(sanitize_tool_name("exec"), "exec");
-}
-
-#[test]
-fn sanitize_tool_name_trims_whitespace() {
-    assert_eq!(sanitize_tool_name("  exec  "), "exec");
-    assert_eq!(sanitize_tool_name("\texec\n"), "exec");
-}
-
-#[test]
-fn sanitize_tool_name_strips_quotes() {
-    assert_eq!(sanitize_tool_name("\"exec\""), "exec");
-    assert_eq!(sanitize_tool_name("  \"web_search\"  "), "web_search");
-}
-
-#[test]
-fn sanitize_tool_name_partial_quotes_unchanged() {
-    assert_eq!(sanitize_tool_name("\"exec"), "\"exec");
-    assert_eq!(sanitize_tool_name("exec\""), "exec\"");
-}
-
-#[test]
-fn sanitize_tool_name_noop_on_real_tool_names() {
-    let real_names = [
-        "exec",
-        "web_search",
-        "web_fetch",
-        "memory_save",
-        "memory_forget",
-        "memory_delete",
-        "memory_search",
-        "file_read",
-        "file_write",
-        "calc",
-        "mcp-server_tool-name",
-    ];
-    for name in real_names {
-        assert_eq!(
-            sanitize_tool_name(name),
-            name,
-            "sanitize_tool_name must be no-op on valid tool name '{name}'"
-        );
-    }
-}
-
-#[test]
-fn sanitize_tool_name_empty_string() {
-    assert_eq!(sanitize_tool_name(""), "");
-    assert_eq!(sanitize_tool_name("  "), "");
-}
-
-#[test]
-fn sanitize_tool_name_only_quotes() {
-    assert_eq!(sanitize_tool_name("\"\""), "");
-}
-
-#[test]
-fn sanitize_tool_name_preserves_internal_quotes() {
-    assert_eq!(sanitize_tool_name("my\"tool"), "my\"tool");
-}
-
-#[test]
-fn sanitize_tool_name_single_quotes_not_stripped() {
-    assert_eq!(sanitize_tool_name("'exec'"), "'exec'");
-}
-
-#[test]
-fn sanitize_tool_name_strips_numeric_suffix() {
-    assert_eq!(sanitize_tool_name("exec_2"), "exec");
-    assert_eq!(sanitize_tool_name("browser_4"), "browser");
-    assert_eq!(sanitize_tool_name("exec_123"), "exec");
-}
-
-#[test]
-fn sanitize_tool_name_strips_functions_prefix() {
-    assert_eq!(sanitize_tool_name("functions_spawn_agent"), "spawn_agent");
-    assert_eq!(sanitize_tool_name("functions_exec"), "exec");
-}
-
-#[test]
-fn sanitize_tool_name_strips_prefix_and_suffix() {
-    assert_eq!(sanitize_tool_name("functions_spawn_agent_6"), "spawn_agent");
-    assert_eq!(sanitize_tool_name("functions_exec_2"), "exec");
-}
-
-#[test]
-fn sanitize_tool_name_preserves_legitimate_underscores() {
-    assert_eq!(sanitize_tool_name("web_search"), "web_search");
-    assert_eq!(sanitize_tool_name("memory_save"), "memory_save");
-    assert_eq!(sanitize_tool_name("memory_forget"), "memory_forget");
-    assert_eq!(sanitize_tool_name("memory_delete"), "memory_delete");
-    assert_eq!(sanitize_tool_name("spawn_agent"), "spawn_agent");
-    assert_eq!(sanitize_tool_name("get_user_location"), "get_user_location");
-}
-
-#[test]
-fn sanitize_tool_name_preserves_mcp_names() {
-    assert_eq!(
-        sanitize_tool_name("mcp__ai__find-tasks"),
-        "mcp__ai__find-tasks"
-    );
-    assert_eq!(
-        sanitize_tool_name("mcp__jmap-mcp-0-1-1__get_emails"),
-        "mcp__jmap-mcp-0-1-1__get_emails"
-    );
-    assert_eq!(
-        sanitize_tool_name("mcp-server_tool-name"),
-        "mcp-server_tool-name"
-    );
-}
-
-#[test]
-fn sanitize_tool_name_functions_prefix_alone_yields_empty() {
-    assert_eq!(sanitize_tool_name("functions_"), "");
-}
-
-#[test]
-fn legacy_public_tool_alias_strips_wasm_suffix() {
-    assert_eq!(
-        legacy_public_tool_alias("web_search_wasm"),
-        Some("web_search")
-    );
-    assert_eq!(legacy_public_tool_alias("calc_wasm"), Some("calc"));
-    assert_eq!(legacy_public_tool_alias("web_search"), None);
-}
-
-#[test]
-fn resolve_tool_lookup_prefers_public_alias_when_both_exist() {
-    let mut tools = ToolRegistry::new();
-    tools.register(Box::new(LargeResultTool {
-        tool_name: "web_search",
-        payload: "public".into(),
-    }));
-    tools.register_wasm(
-        Box::new(LargeResultTool {
-            tool_name: "web_search_wasm",
-            payload: "legacy".into(),
-        }),
-        [0x11; 32],
-    );
-
-    let (tool, resolved_name) = resolve_tool_lookup(&tools, "web_search_wasm");
-    let tool = tool.expect("resolved tool should exist");
-    assert_eq!(resolved_name, "web_search");
-    assert_eq!(tool.name(), "web_search");
-}
-
-#[test]
-fn resolve_tool_lookup_falls_back_to_legacy_name_when_no_public_tool_exists() {
-    let mut tools = ToolRegistry::new();
-    tools.register_wasm(
-        Box::new(LargeResultTool {
-            tool_name: "web_search_wasm",
-            payload: "legacy".into(),
-        }),
-        [0x22; 32],
-    );
-
-    let (tool, resolved_name) = resolve_tool_lookup(&tools, "web_search_wasm");
-    let tool = tool.expect("legacy tool should exist");
-    assert_eq!(resolved_name, "web_search_wasm");
-    assert_eq!(tool.name(), "web_search_wasm");
 }

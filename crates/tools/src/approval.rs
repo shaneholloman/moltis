@@ -1,4 +1,9 @@
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 
 use {
     crate::error::Error,
@@ -255,11 +260,151 @@ static DANGEROUS_SET: std::sync::LazyLock<RegexSet> = std::sync::LazyLock::new(|
 /// Check if a command matches any dangerous pattern.
 /// Returns the description of the first matching pattern.
 pub fn check_dangerous(command: &str) -> Option<&'static str> {
+    let scan_command = strip_heredoc_bodies(command);
     DANGEROUS_SET
-        .matches(command)
+        .matches(scan_command.as_ref())
         .iter()
         .next()
         .map(|i| DANGEROUS_PATTERN_DEFS[i].1)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeredocDelimiter {
+    marker: String,
+    strip_tabs: bool,
+}
+
+fn strip_heredoc_bodies(command: &str) -> Cow<'_, str> {
+    let mut stripped = String::new();
+    let mut changed = false;
+    let mut pending: VecDeque<HeredocDelimiter> = VecDeque::new();
+    let mut omitted = String::new();
+
+    for line in command.split_inclusive('\n') {
+        let line_without_newline = line.trim_end_matches('\n');
+
+        if let Some(delimiter) = pending.front() {
+            let candidate = if delimiter.strip_tabs {
+                line_without_newline.trim_start_matches('\t')
+            } else {
+                line_without_newline
+            };
+            if candidate == delimiter.marker {
+                pending.pop_front();
+                if pending.is_empty() {
+                    omitted.clear();
+                }
+            } else {
+                omitted.push_str(line);
+            }
+            changed = true;
+            continue;
+        }
+
+        stripped.push_str(line);
+        let mut delimiters = heredoc_delimiters(line_without_newline);
+        if !delimiters.is_empty() {
+            changed = true;
+            pending.extend(delimiters.drain(..));
+        }
+    }
+
+    if !pending.is_empty() {
+        stripped.push_str(&omitted);
+    }
+
+    if changed {
+        Cow::Owned(stripped)
+    } else {
+        Cow::Borrowed(command)
+    }
+}
+
+fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut delimiters = Vec::new();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < chars.len() {
+        match chars[i] {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                i += 1;
+            },
+            '"' if !in_single => {
+                in_double = !in_double;
+                i += 1;
+            },
+            '\\' if !in_single => {
+                i = (i + 2).min(chars.len());
+            },
+            '<' if !in_single && !in_double && chars.get(i + 1) == Some(&'<') => {
+                if chars.get(i + 2) == Some(&'<') {
+                    i += 3;
+                    continue;
+                }
+
+                i += 2;
+                let strip_tabs = chars.get(i) == Some(&'-');
+                if strip_tabs {
+                    i += 1;
+                }
+                while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+                    i += 1;
+                }
+                if let Some(marker) = parse_heredoc_marker(&chars, &mut i) {
+                    delimiters.push(HeredocDelimiter { marker, strip_tabs });
+                }
+            },
+            _ => {
+                i += 1;
+            },
+        }
+    }
+
+    delimiters
+}
+
+fn parse_heredoc_marker(chars: &[char], i: &mut usize) -> Option<String> {
+    let mut marker = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(&c) = chars.get(*i) {
+        if !in_single && !in_double && (c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
+            break;
+        }
+
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                *i += 1;
+            },
+            '"' if !in_single => {
+                in_double = !in_double;
+                *i += 1;
+            },
+            '\\' if !in_single => {
+                *i += 1;
+                if let Some(&escaped) = chars.get(*i) {
+                    marker.push(escaped);
+                    *i += 1;
+                }
+            },
+            _ => {
+                marker.push(c);
+                *i += 1;
+            },
+        }
+    }
+
+    if marker.is_empty() {
+        None
+    } else {
+        Some(marker)
+    }
 }
 
 /// Extract the first command/binary from a shell command string.
@@ -772,6 +917,42 @@ mod tests {
     }
 
     #[test]
+    fn test_heredoc_body_not_flagged_as_dangerous() {
+        let command = "cat > /tmp/safety-test.md << 'EOF'\n\
+WARNING: never run rm -rf / on a production server\n\
+EOF\n";
+
+        assert!(check_dangerous(command).is_none());
+    }
+
+    #[test]
+    fn test_heredoc_executable_lines_still_flagged_as_dangerous() {
+        let command = "cat <<EOF\n\
+plain text only\n\
+EOF\n\
+rm -rf /\n";
+
+        assert_eq!(check_dangerous(command), Some("rm -r on filesystem root"));
+    }
+
+    #[test]
+    fn test_unterminated_heredoc_body_still_scanned_as_dangerous() {
+        let command = "cat <<EOF\n\
+rm -rf /\n";
+
+        assert_eq!(check_dangerous(command), Some("rm -r on filesystem root"));
+    }
+
+    #[test]
+    fn test_strip_tabs_heredoc_body_not_flagged_as_dangerous() {
+        let command = "cat <<-EOF\n\
+\tWARNING: never run rm -rf / on a production server\n\
+\tEOF\n";
+
+        assert!(check_dangerous(command).is_none());
+    }
+
+    #[test]
     fn test_dangerous_rm_rf_home() {
         assert_eq!(check_dangerous("rm -rf ~"), Some("rm -r on home directory"));
         assert_eq!(
@@ -915,6 +1096,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_heredoc_body_allowed_when_mode_off() {
+        let mgr = ApprovalManager {
+            mode: ApprovalMode::Off,
+            ..Default::default()
+        };
+        let command = "cat > /tmp/safety-test.md << 'EOF'\n\
+WARNING: never run rm -rf / on a production server\n\
+EOF\n";
+
+        let action = mgr.check_command(command).await.unwrap();
+        assert_eq!(action, ApprovalAction::Proceed);
+    }
+
+    #[tokio::test]
     async fn test_dangerous_denied_when_mode_off_full_security() {
         // Full security level does not change the safety floor: dangerous
         // commands are still denied in Off mode.
@@ -959,390 +1154,5 @@ mod tests {
         );
     }
 
-    // --- Env-var prefix injection (moltis-org/moltis#814) ---
-
-    // Layer 1: check_dangerous regex hits
-
-    #[test]
-    fn test_dangerous_ld_preload() {
-        assert_eq!(
-            check_dangerous("LD_PRELOAD=/evil.so cat /etc/passwd"),
-            Some("dangerous dynamic linker env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_ld_library_path() {
-        assert_eq!(
-            check_dangerous("LD_LIBRARY_PATH=/tmp cat /file"),
-            Some("dangerous dynamic linker env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_ld_audit() {
-        assert_eq!(
-            check_dangerous("LD_AUDIT=/evil.so ls"),
-            Some("dangerous dynamic linker env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_dyld_insert_libraries() {
-        assert_eq!(
-            check_dangerous("DYLD_INSERT_LIBRARIES=/evil.dylib cat /etc/passwd"),
-            Some("dangerous macOS dynamic linker env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_dyld_library_path() {
-        assert_eq!(
-            check_dangerous("DYLD_LIBRARY_PATH=/tmp ls"),
-            Some("dangerous macOS dynamic linker env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_path_override() {
-        assert_eq!(
-            check_dangerous("PATH=/tmp:$PATH cat /etc/passwd"),
-            Some("PATH override"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_pythonpath() {
-        assert_eq!(
-            check_dangerous("PYTHONPATH=/evil python3 -c 'import os'"),
-            Some("dangerous language runtime env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_node_options() {
-        assert_eq!(
-            check_dangerous("NODE_OPTIONS='--require=/evil.js' node app.js"),
-            Some("dangerous language runtime env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_java_tool_options() {
-        assert_eq!(
-            check_dangerous("JAVA_TOOL_OPTIONS=-javaagent:/evil.jar java Main"),
-            Some("dangerous language runtime env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_java_options_variants() {
-        assert_eq!(
-            check_dangerous("_JAVA_OPTIONS=-javaagent:/evil.jar java Main"),
-            Some("dangerous language runtime env var"),
-        );
-        assert_eq!(
-            check_dangerous("JDK_JAVA_OPTIONS=-javaagent:/evil.jar java Main"),
-            Some("dangerous language runtime env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_perl5opt() {
-        assert_eq!(
-            check_dangerous("PERL5OPT=-M/evil perl -e1"),
-            Some("dangerous language runtime env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_rubyopt() {
-        assert_eq!(
-            check_dangerous("RUBYOPT=-r/evil ruby -e1"),
-            Some("dangerous language runtime env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_bash_env() {
-        assert_eq!(
-            check_dangerous("BASH_ENV=/evil.sh bash -c 'echo hi'"),
-            Some("dangerous shell startup env var"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_env_var_in_subshell_not_caught_by_regex() {
-        // Anchored regex patterns intentionally do NOT match env vars inside
-        // quoted subshell arguments. This is safe because sh/bash are not safe
-        // bins and require approval via the mode/allowlist path.
-        assert!(check_dangerous(r#"sh -c "LD_PRELOAD=/evil.so cat /etc/passwd""#).is_none());
-    }
-
-    #[test]
-    fn test_dangerous_env_var_after_separator() {
-        // Patterns still fire after command separators.
-        assert_eq!(
-            check_dangerous("echo hi; LD_PRELOAD=/evil.so cat /file"),
-            Some("dangerous dynamic linker env var"),
-        );
-        assert_eq!(
-            check_dangerous("true && PATH=/evil:$PATH cmd"),
-            Some("PATH override"),
-        );
-    }
-
-    #[test]
-    fn test_dangerous_env_var_case_insensitive() {
-        assert_eq!(
-            check_dangerous("ld_preload=/evil.so cat /file"),
-            Some("dangerous dynamic linker env var"),
-        );
-    }
-
-    #[test]
-    fn test_benign_env_var_not_flagged() {
-        // Variables whose names are not in the dangerous list.
-        assert!(check_dangerous("FOO=bar echo hi").is_none());
-        assert!(check_dangerous("RUST_LOG=debug cargo test").is_none());
-        assert!(check_dangerous("MY_LD_PRELOAD_FLAG=1 echo hi").is_none());
-        // LD_DEBUG is diagnostic only (no code injection) — not flagged.
-        assert!(check_dangerous("LD_DEBUG=bindings ./myprogram").is_none());
-        // Bare ENV is too noisy (ENV=test, ENV=production) — not flagged.
-        assert!(check_dangerous("ENV=test rake test").is_none());
-        assert!(check_dangerous("ENV=production ./server").is_none());
-    }
-
-    #[test]
-    fn test_no_false_positive_on_grep_sed_arguments() {
-        // Regression test: env var names inside grep/sed/awk arguments must
-        // NOT trigger the regex. The (?:^|[;&|]\s*) anchor prevents this.
-        assert!(check_dangerous("grep 'PATH=' ~/.bashrc").is_none());
-        assert!(check_dangerous(r#"grep "PATH=" .env"#).is_none());
-        assert!(check_dangerous("sed -n '/PATH=/p' .env").is_none());
-        assert!(check_dangerous("awk -F'PATH=' '{print $2}' file").is_none());
-        assert!(check_dangerous("grep 'LD_PRELOAD=' config.txt").is_none());
-        assert!(check_dangerous("grep 'NODE_OPTIONS=' .env").is_none());
-        // Unquoted grep with empty value — also benign.
-        assert!(check_dangerous("grep PATH= file").is_none());
-        // Unquoted grep with value — also benign (the `PATH=` is an argument,
-        // not a shell assignment).
-        assert!(check_dangerous("grep PATH=/usr/bin .env").is_none());
-        assert!(check_dangerous("grep LD_PRELOAD=/path config.txt").is_none());
-    }
-
-    // Layer 2: extract_first_bin semantic check
-
-    #[test]
-    fn test_extract_first_bin_dangerous_prefix_returns_none() {
-        assert_eq!(extract_first_bin("LD_PRELOAD=/evil.so cat /file"), None);
-        assert_eq!(extract_first_bin("DYLD_INSERT_LIBRARIES=/e.dylib ls"), None);
-        assert_eq!(extract_first_bin("PATH=/tmp:$PATH cat /etc/passwd"), None);
-        assert_eq!(extract_first_bin("NODE_OPTIONS=--evil node app.js"), None);
-        assert_eq!(extract_first_bin("BASH_ENV=/evil.sh bash -c hi"), None);
-    }
-
-    #[test]
-    fn test_extract_first_bin_dangerous_case_insensitive() {
-        assert_eq!(extract_first_bin("ld_preload=/evil.so cat /file"), None);
-        assert_eq!(extract_first_bin("Ld_Preload=/evil.so cat /file"), None);
-    }
-
-    #[test]
-    fn test_extract_first_bin_benign_prefix_still_works() {
-        assert_eq!(extract_first_bin("FOO=bar echo hi"), Some("echo"));
-        assert_eq!(
-            extract_first_bin("RUST_LOG=debug cargo test"),
-            Some("cargo"),
-        );
-        assert_eq!(extract_first_bin("CC=gcc CXX=g++ cmake .."), Some("cmake"),);
-    }
-
-    #[test]
-    fn test_extract_first_bin_non_dangerous_ld_prefix() {
-        // MY_LD_PRELOAD_FLAG contains "LD_PRELOAD" as substring but the key
-        // itself is not a match.
-        assert_eq!(
-            extract_first_bin("MY_LD_PRELOAD_FLAG=1 echo hi"),
-            Some("echo"),
-        );
-    }
-
-    #[test]
-    fn test_extract_first_bin_quoted_token_limitation() {
-        // Quoted env-var assignments bypass Layer 2 because split_once('=')
-        // sees key `"LD_PRELOAD` (with leading `"`). The anchored regex
-        // (Layer 1) also does not match here because `"` is not whitespace.
-        // In practice, shells interpret `"LD_PRELOAD=/evil.so"` as a command
-        // name, not an env-var assignment, so this is not an exploitable
-        // vector. And sh/bash subshell wrappers require approval separately.
-        assert_eq!(
-            extract_first_bin(r#""LD_PRELOAD=/evil.so" cat /file"#),
-            Some("cat"),
-        );
-        assert!(check_dangerous(r#""LD_PRELOAD=/evil.so" cat /file"#).is_none());
-    }
-
-    #[test]
-    fn test_extract_first_bin_ld_debug_and_env_are_benign() {
-        // LD_DEBUG and ENV were intentionally excluded from DANGEROUS_ENV_VARS.
-        assert_eq!(
-            extract_first_bin("LD_DEBUG=bindings ./myprogram"),
-            Some("myprogram"),
-        );
-        assert_eq!(extract_first_bin("ENV=test rake test"), Some("rake"));
-    }
-
-    // is_safe_command rejects dangerous-prefixed safe commands
-
-    #[test]
-    fn test_is_safe_command_rejects_dangerous_prefix() {
-        assert!(!is_safe_command("LD_PRELOAD=/evil.so cat /etc/passwd"));
-        assert!(!is_safe_command("PATH=/tmp echo hi"));
-        assert!(!is_safe_command("DYLD_INSERT_LIBRARIES=/e.dylib ls"));
-    }
-
-    #[test]
-    fn test_is_safe_command_allows_benign_prefix() {
-        assert!(is_safe_command("FOO=bar echo hi"));
-        assert!(is_safe_command("RUST_LOG=debug cat file.txt"));
-    }
-
-    // matches_allowlist rejects dangerous-prefixed allowlisted commands
-
-    #[test]
-    fn test_allowlist_rejects_dangerous_prefix() {
-        let list = vec!["cat".into(), "ls".into()];
-        assert!(!matches_allowlist("LD_PRELOAD=/evil.so cat /file", &list));
-        assert!(!matches_allowlist("PATH=/tmp ls", &list));
-    }
-
-    #[test]
-    fn test_allowlist_wildcard_still_matches_dangerous_prefix() {
-        // Wildcard `*` overrides everything — existing documented behavior.
-        let list = vec!["*".into()];
-        assert!(matches_allowlist("LD_PRELOAD=/evil.so cat /file", &list));
-    }
-
-    #[test]
-    fn test_allowlist_prefix_no_bypass_via_chained_assignment() {
-        // Regression: `command.starts_with(prefix)` must not match when
-        // extract_first_bin returned None due to a dangerous env var.
-        let list = vec!["MY_APP*".into()];
-        assert!(!matches_allowlist(
-            "MY_APP=1 LD_PRELOAD=/evil.so cat /file",
-            &list,
-        ));
-        // But benign chained assignments still match.
-        assert!(matches_allowlist("MY_APP run --flag", &list));
-    }
-
-    // check_command integration tests
-
-    #[tokio::test]
-    async fn test_env_injection_needs_approval_on_miss() {
-        let mgr = ApprovalManager::default();
-        let action = mgr
-            .check_command("LD_PRELOAD=/evil.so cat /etc/passwd")
-            .await
-            .unwrap();
-        assert_eq!(action, ApprovalAction::NeedsApproval);
-    }
-
-    #[tokio::test]
-    async fn test_env_injection_denied_in_off_mode() {
-        let mgr = ApprovalManager {
-            mode: ApprovalMode::Off,
-            ..Default::default()
-        };
-        let err = mgr
-            .check_command("LD_PRELOAD=/evil.so cat /etc/passwd")
-            .await
-            .expect_err("expected denial for env injection in off mode");
-        assert!(
-            err.to_string().contains("dangerous"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_chained_env_injection_denied_in_off_empty_allowlist() {
-        // Regression: chained assignments must be caught by Layer 2 safety
-        // floor even when Off+empty-allowlist short-circuits before mode check.
-        let mgr = ApprovalManager {
-            mode: ApprovalMode::Off,
-            ..Default::default()
-        };
-        let err = mgr
-            .check_command("FOO=bar LD_PRELOAD=/evil.so cat /etc/passwd")
-            .await
-            .expect_err("expected denial for chained env injection in off mode");
-        assert!(
-            err.to_string().contains("dangerous env-var prefix"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_chained_env_injection_needs_approval_on_miss() {
-        let mgr = ApprovalManager::default();
-        let action = mgr
-            .check_command("FOO=bar LD_PRELOAD=/evil.so cat /etc/passwd")
-            .await
-            .unwrap();
-        assert_eq!(action, ApprovalAction::NeedsApproval);
-    }
-
-    #[tokio::test]
-    async fn test_env_injection_needs_approval_always_mode() {
-        let mgr = ApprovalManager {
-            mode: ApprovalMode::Always,
-            ..Default::default()
-        };
-        let action = mgr
-            .check_command("DYLD_INSERT_LIBRARIES=/evil.dylib ls")
-            .await
-            .unwrap();
-        assert_eq!(action, ApprovalAction::NeedsApproval);
-    }
-
-    #[tokio::test]
-    async fn test_benign_prefix_proceeds_on_miss() {
-        let mgr = ApprovalManager::default();
-        let action = mgr.check_command("RUST_LOG=debug echo hi").await.unwrap();
-        assert_eq!(action, ApprovalAction::Proceed);
-    }
-
-    #[tokio::test]
-    async fn test_env_injection_in_subshell_needs_approval() {
-        // Regex doesn't match inside quotes, but sh is not a safe bin so
-        // the mode check (OnMiss) still requires approval.
-        let mgr = ApprovalManager::default();
-        let action = mgr
-            .check_command(r#"sh -c "LD_PRELOAD=/evil.so cat /etc/passwd""#)
-            .await
-            .unwrap();
-        assert_eq!(action, ApprovalAction::NeedsApproval);
-    }
-
-    #[tokio::test]
-    async fn test_env_injection_with_explicit_allowlist_wildcard() {
-        // Wildcard allowlist still overrides dangerous env var patterns.
-        let mgr = ApprovalManager {
-            allowlist: vec!["*".into()],
-            ..Default::default()
-        };
-        let action = mgr
-            .check_command("LD_PRELOAD=/evil.so cat /etc/passwd")
-            .await
-            .unwrap();
-        // Dangerous pattern matched, but allowlist wildcard overrides → falls
-        // through to the mode check where safe-bin check fails (extract_first_bin
-        // returns None) → NeedsApproval in default OnMiss mode.
-        // Actually: check_dangerous fires, matches_allowlist("*") returns true,
-        // so the dangerous block is skipped. Then security_level=Allowlist,
-        // mode=OnMiss. is_safe_command returns false (extract_first_bin → None).
-        // matches_allowlist("*") returns true → Proceed.
-        assert_eq!(action, ApprovalAction::Proceed);
-    }
+    mod env_prefix;
 }

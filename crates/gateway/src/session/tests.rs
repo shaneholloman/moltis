@@ -573,6 +573,7 @@ mod tests {
         convert_payload: Option<Value>,
         convert_error: Option<String>,
         convert_calls: AtomicU32,
+        last_convert_params: std::sync::Mutex<Option<Value>>,
     }
 
     impl MockTtsService {
@@ -582,6 +583,7 @@ mod tests {
                 convert_payload,
                 convert_error: None,
                 convert_calls: AtomicU32::new(0),
+                last_convert_params: std::sync::Mutex::new(None),
             }
         }
 
@@ -591,6 +593,7 @@ mod tests {
                 convert_payload: None,
                 convert_error: Some(error.to_string()),
                 convert_calls: AtomicU32::new(0),
+                last_convert_params: std::sync::Mutex::new(None),
             }
         }
     }
@@ -613,8 +616,9 @@ mod tests {
             Ok(serde_json::json!({}))
         }
 
-        async fn convert(&self, _params: Value) -> ServiceResult {
+        async fn convert(&self, params: Value) -> ServiceResult {
             self.convert_calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_convert_params.lock().unwrap() = Some(params);
             if let Some(ref error) = self.convert_error {
                 return Err(error.clone().into());
             }
@@ -679,7 +683,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_generate_creates_and_persists_audio() {
+    async fn voice_generate_uses_mp3_for_openai_compatible_tts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        store
+            .append(
+                "main",
+                &serde_json::json!({ "role": "user", "content": "hello" }),
+            )
+            .await
+            .expect("append user");
+        store
+            .append(
+                "main",
+                &serde_json::json!({
+                    "role": "assistant",
+                    "content": "here is the reply",
+                    "run_id": "run-generate",
+                }),
+            )
+            .await
+            .expect("append assistant");
+
+        let audio_bytes = b"ID3new".to_vec();
+        let mock_tts = Arc::new(MockTtsService::new(
+            serde_json::json!({ "enabled": true, "provider": "openai", "maxTextLength": 8000 }),
+            Some(serde_json::json!({
+                "audio": general_purpose::STANDARD.encode(&audio_bytes),
+                "provider": "openai",
+            })),
+        ));
+        let service = LiveSessionService::new(Arc::clone(&store), metadata)
+            .with_tts_service(Arc::clone(&mock_tts) as Arc<dyn TtsService>);
+
+        let result = service
+            .voice_generate(serde_json::json!({ "key": "main", "runId": "run-generate" }))
+            .await
+            .expect("voice generate");
+
+        assert_eq!(result["reused"], false);
+        let audio_path = result["audio"].as_str().unwrap_or_default().to_string();
+        assert_eq!(audio_path, "media/main/voice-msg-1.mp3");
+        assert_eq!(result["ttsProvider"].as_str(), Some("openai"));
+        assert_eq!(mock_tts.convert_calls.load(Ordering::SeqCst), 1);
+        let convert_params = mock_tts
+            .last_convert_params
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        assert_eq!(convert_params["format"].as_str(), Some("mp3"));
+        assert_eq!(convert_params["text"].as_str(), Some("here is the reply"));
+
+        let history = store.read("main").await.expect("read history");
+        assert_eq!(history[1]["audio"].as_str(), Some(audio_path.as_str()));
+        assert_eq!(history[1]["tts_provider"].as_str(), Some("openai"));
+
+        let filename = media_filename(&audio_path).expect("filename");
+        let saved = store
+            .read_media("main", filename)
+            .await
+            .expect("read media");
+        assert_eq!(saved, audio_bytes);
+    }
+
+    #[tokio::test]
+    async fn voice_generate_keeps_ogg_for_non_openai_tts() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
@@ -706,7 +778,7 @@ mod tests {
 
         let audio_bytes = b"OggSnew".to_vec();
         let mock_tts = Arc::new(MockTtsService::new(
-            serde_json::json!({ "enabled": true, "maxTextLength": 8000 }),
+            serde_json::json!({ "enabled": true, "provider": "elevenlabs", "maxTextLength": 8000 }),
             Some(serde_json::json!({
                 "audio": general_purpose::STANDARD.encode(&audio_bytes),
                 "provider": "elevenlabs",
@@ -724,18 +796,13 @@ mod tests {
         let audio_path = result["audio"].as_str().unwrap_or_default().to_string();
         assert_eq!(audio_path, "media/main/voice-msg-1.ogg");
         assert_eq!(result["ttsProvider"].as_str(), Some("elevenlabs"));
-        assert_eq!(mock_tts.convert_calls.load(Ordering::SeqCst), 1);
-
-        let history = store.read("main").await.expect("read history");
-        assert_eq!(history[1]["audio"].as_str(), Some(audio_path.as_str()));
-        assert_eq!(history[1]["tts_provider"].as_str(), Some("elevenlabs"));
-
-        let filename = media_filename(&audio_path).expect("filename");
-        let saved = store
-            .read_media("main", filename)
-            .await
-            .expect("read media");
-        assert_eq!(saved, audio_bytes);
+        let convert_params = mock_tts
+            .last_convert_params
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        assert_eq!(convert_params["format"].as_str(), Some("opus"));
     }
 
     #[tokio::test]
@@ -1305,160 +1372,8 @@ mod tests {
         assert!(metadata.get("cron:archive-me").await.unwrap().archived);
     }
 
-    #[tokio::test]
-    async fn patch_archived_allows_unarchive_for_current_channel_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-        let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
-        let binding =
-            r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#.to_string();
-        metadata
-            .upsert("telegram:bot1:123", Some("Telegram current".to_string()))
-            .await
-            .unwrap();
-        metadata
-            .set_channel_binding("telegram:bot1:123", Some(binding))
-            .await;
-        metadata.set_archived("telegram:bot1:123", true).await;
-
-        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata));
-
-        let result = svc
-            .patch(serde_json::json!({ "key": "telegram:bot1:123", "archived": false }))
-            .await
-            .unwrap();
-        assert_eq!(
-            result.get("archived").and_then(|v| v.as_bool()),
-            Some(false)
-        );
-        assert!(!metadata.get("telegram:bot1:123").await.unwrap().archived);
-    }
-
-    #[tokio::test]
-    async fn patch_archived_rejection_does_not_partially_mutate_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-        let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
-        metadata
-            .upsert("main", Some("Main".to_string()))
-            .await
-            .unwrap();
-        metadata
-            .set_model("main", Some("claude-sonnet".to_string()))
-            .await;
-
-        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata));
-
-        let error = svc
-            .patch(serde_json::json!({
-                "key": "main",
-                "label": "Mutated?",
-                "model": "gpt-5",
-                "archived": true
-            }))
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("cannot be archived"));
-
-        let entry = metadata.get("main").await.unwrap();
-        assert_eq!(entry.label.as_deref(), Some("Main"));
-        assert_eq!(entry.model.as_deref(), Some("claude-sonnet"));
-        assert!(!entry.archived);
-    }
-
-    #[tokio::test]
-    async fn search_excludes_archived_sessions_unless_requested() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-        let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
-        metadata
-            .upsert("session:visible", Some("Visible".to_string()))
-            .await
-            .unwrap();
-        metadata
-            .upsert("session:hidden", Some("Hidden".to_string()))
-            .await
-            .unwrap();
-        metadata.set_archived("session:hidden", true).await;
-        store
-            .append(
-                "session:visible",
-                &serde_json::json!({"role": "user", "content": "archive needle visible"}),
-            )
-            .await
-            .unwrap();
-        store
-            .append(
-                "session:hidden",
-                &serde_json::json!({"role": "user", "content": "archive needle hidden"}),
-            )
-            .await
-            .unwrap();
-
-        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata));
-
-        let default_results = svc
-            .search(serde_json::json!({ "query": "needle", "limit": 10 }))
-            .await
-            .unwrap()
-            .as_array()
-            .cloned()
-            .unwrap();
-        assert_eq!(default_results.len(), 1);
-        assert_eq!(default_results[0]["sessionKey"], "session:visible");
-        assert_eq!(default_results[0]["archived"], false);
-
-        let include_archived_results = svc
-            .search(serde_json::json!({
-                "query": "needle",
-                "limit": 10,
-                "includeArchived": true
-            }))
-            .await
-            .unwrap()
-            .as_array()
-            .cloned()
-            .unwrap();
-        assert_eq!(include_archived_results.len(), 2);
-        assert!(
-            include_archived_results
-                .iter()
-                .any(|entry| entry["sessionKey"] == "session:hidden" && entry["archived"] == true)
-        );
-    }
-
-    #[tokio::test]
-    async fn search_includes_results_without_metadata_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-        let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
-        store
-            .append(
-                "session:orphaned",
-                &serde_json::json!({"role": "user", "content": "needle without metadata"}),
-            )
-            .await
-            .unwrap();
-
-        let svc = LiveSessionService::new(Arc::clone(&store), Arc::clone(&metadata));
-
-        let results = svc
-            .search(serde_json::json!({ "query": "needle", "limit": 10 }))
-            .await
-            .unwrap()
-            .as_array()
-            .cloned()
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["sessionKey"], "session:orphaned");
-        assert!(results[0]["label"].is_null());
-        assert_eq!(results[0]["archived"], false);
-    }
+    #[path = "archive_search_tests.rs"]
+    mod archive_search_tests;
 
     #[cfg(feature = "fs-tools")]
     #[tokio::test]

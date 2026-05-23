@@ -74,6 +74,82 @@ key_path = "/path/to/key.pem"
 }
 
 #[test]
+fn tls_public_ip_accepts_ip_address() {
+    let toml = r#"
+[tls]
+public_ip = "203.0.113.10"
+"#;
+    let result = validate_toml_str(toml);
+    assert!(
+        result.diagnostics.iter().all(|d| d.path != "tls.public_ip"),
+        "expected no public_ip diagnostics, got: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn tls_public_ip_rejects_dns_name() {
+    let toml = r#"
+[tls]
+public_ip = "chat.example.com"
+"#;
+    let result = validate_toml_str(toml);
+    let error = result
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == Severity::Error && d.path == "tls.public_ip");
+    assert!(
+        error.is_some(),
+        "expected error for non-IP public_ip, got: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn tls_public_ip_warns_for_loopback_or_unspecified_address() {
+    for public_ip in ["127.0.0.1", "::1", "0.0.0.0", "::"] {
+        let toml = format!(
+            r#"
+[tls]
+public_ip = "{public_ip}"
+"#
+        );
+        let result = validate_toml_str(&toml);
+        let warning = result.diagnostics.iter().find(|d| {
+            d.severity == Severity::Warning
+                && d.path == "tls.public_ip"
+                && d.message.contains("loopback or unspecified")
+        });
+        assert!(
+            warning.is_some(),
+            "expected warning for {public_ip}, got: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn tls_public_ip_warns_with_custom_cert_paths() {
+    let toml = r#"
+[tls]
+cert_path = "/path/to/cert.pem"
+key_path = "/path/to/key.pem"
+public_ip = "203.0.113.10"
+"#;
+    let result = validate_toml_str(toml);
+    let warning = result.diagnostics.iter().find(|d| {
+        d.severity == Severity::Warning
+            && d.path == "tls.public_ip"
+            && d.message.contains("has no effect")
+    });
+    assert!(
+        warning.is_some(),
+        "expected warning for public_ip with custom certs, got: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
 fn unknown_tailscale_mode_warned() {
     let toml = r#"
 [tailscale]
@@ -87,6 +163,60 @@ mode = "tunnel"
     assert!(
         warning.is_some(),
         "expected warning for unknown tailscale mode 'tunnel'"
+    );
+}
+
+#[test]
+fn netbird_fields_are_recognized() {
+    let toml = r#"
+[netbird]
+mode = "serve"
+"#;
+    let result = validate_toml_str(toml);
+    let unknown = result
+        .diagnostics
+        .iter()
+        .find(|d| d.category == "unknown-field" && d.path.starts_with("netbird."));
+    assert!(
+        unknown.is_none(),
+        "netbird fields should be recognized, got: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn unknown_netbird_mode_warned() {
+    let toml = r#"
+[netbird]
+mode = "funnel"
+"#;
+    let result = validate_toml_str(toml);
+    let warning = result.diagnostics.iter().find(|d| d.path == "netbird.mode");
+    assert!(
+        warning.is_some(),
+        "expected warning for unknown netbird mode 'funnel', got: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn netbird_serve_auth_disabled_warned() {
+    let toml = r#"
+[auth]
+disabled = true
+
+[netbird]
+mode = "serve"
+"#;
+    let result = validate_toml_str(toml);
+    let warning = result
+        .diagnostics
+        .iter()
+        .find(|d| d.category == "security" && d.path == "netbird.mode");
+    assert!(
+        warning.is_some(),
+        "expected security warning for NetBird serve mode with disabled auth, got: {:?}",
+        result.diagnostics
     );
 }
 
@@ -106,6 +236,47 @@ domain = "team-gateway.ngrok.app"
     assert!(
         unknown.is_none(),
         "ngrok fields should be recognized, got: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn cloudflare_tunnel_fields_are_recognized() {
+    let toml = r#"
+[cloudflare_tunnel]
+enabled = true
+token = "secret"
+hostname = "moltis.example.com"
+"#;
+    let result = validate_toml_str(toml);
+    let unknown = result
+        .diagnostics
+        .iter()
+        .find(|d| d.category == "unknown-field" && d.path.starts_with("cloudflare_tunnel."));
+    assert!(
+        unknown.is_none(),
+        "cloudflare_tunnel fields should be recognized, got: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn cloudflare_tunnel_auth_disabled_warned() {
+    let toml = r#"
+[auth]
+disabled = true
+
+[cloudflare_tunnel]
+enabled = true
+"#;
+    let result = validate_toml_str(toml);
+    let warning = result
+        .diagnostics
+        .iter()
+        .find(|d| d.category == "security" && d.path == "cloudflare_tunnel.enabled");
+    assert!(
+        warning.is_some(),
+        "expected security warning for Cloudflare Tunnel with disabled auth, got: {:?}",
         result.diagnostics
     );
 }

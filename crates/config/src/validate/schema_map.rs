@@ -53,6 +53,17 @@ pub(super) fn build_schema_map() -> KnownKeys {
         ]))
     };
 
+    let external_agent_entry = || {
+        Struct(HashMap::from([
+            ("binary", Leaf),
+            ("args", Array(Box::new(Leaf))),
+            ("env", Map(Box::new(Leaf))),
+            ("working_dir", Leaf),
+            ("timeout_secs", Leaf),
+            ("use_tmux", Leaf),
+        ]))
+    };
+
     let resource_limits = || {
         Struct(HashMap::from([
             ("memory_limit", Leaf),
@@ -235,6 +246,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
     let mcp_oauth_override = || {
         Struct(HashMap::from([
             ("client_id", Leaf),
+            ("client_secret", Leaf),
             ("auth_url", Leaf),
             ("token_url", Leaf),
             ("scopes", Leaf),
@@ -386,6 +398,13 @@ pub(super) fn build_schema_map() -> KnownKeys {
             ])),
         ),
         (
+            "external_agents",
+            Struct(HashMap::from([
+                ("enabled", Leaf),
+                ("agents", Map(Box::new(external_agent_entry()))),
+            ])),
+        ),
+        (
             "modes",
             Struct(HashMap::from([("presets", Map(Box::new(mode_preset())))])),
         ),
@@ -449,10 +468,14 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 ("cert_path", Leaf),
                 ("key_path", Leaf),
                 ("ca_cert_path", Leaf),
+                ("public_ip", Leaf),
                 ("http_redirect_port", Leaf),
             ])),
         ),
-        ("auth", Struct(HashMap::from([("disabled", Leaf)]))),
+        (
+            "auth",
+            Struct(HashMap::from([("disabled", Leaf), ("vault_enabled", Leaf)])),
+        ),
         ("graphql", Struct(HashMap::from([("enabled", Leaf)]))),
         (
             "metrics",
@@ -519,9 +542,18 @@ pub(super) fn build_schema_map() -> KnownKeys {
             ])),
         ),
         (
+            "cloudflare_tunnel",
+            Struct(HashMap::from([
+                ("enabled", Leaf),
+                ("token", Leaf),
+                ("hostname", Leaf),
+            ])),
+        ),
+        (
             "tailscale",
             Struct(HashMap::from([("mode", Leaf), ("reset_on_exit", Leaf)])),
         ),
+        ("netbird", Struct(HashMap::from([("mode", Leaf)]))),
         (
             "failover",
             Struct(HashMap::from([

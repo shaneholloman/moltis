@@ -28,8 +28,8 @@ provider so you can skip the browser setup wizard entirely.
 
 | Port | Purpose |
 |------|---------|
-| 13131 | Gateway (HTTPS) — web UI, API, WebSocket |
-| 13132 | HTTP — CA certificate download for TLS trust |
+| 13131 | Gateway (HTTPS by default, HTTP with `--no-tls`) — web UI, API, WebSocket |
+| 13132 | HTTP — CA certificate download for local TLS trust |
 | 1455 | OAuth callback — required for OpenAI Codex and other providers with pre-registered redirect URIs |
 
 ### Trusting the TLS certificate
@@ -53,6 +53,29 @@ sudo update-ca-certificates
 
 After trusting the CA, restart your browser. The warning will not appear again
 (the CA persists in the mounted config volume).
+
+This local CA only solves certificate trust for names included in the generated
+server certificate, such as `localhost`, `moltis.localhost`, the container or
+host name, and sometimes an inferred non-loopback bind IP. It does not make a
+certificate valid for an arbitrary public VPS IP address or hosting-provider
+domain. Browsers still reject those targets with a certificate name mismatch if
+they are not present in the certificate SAN list. IP-address URLs require an IP
+SAN. For direct `https://<public-ip>:13131` access, set `tls.public_ip` to that
+address before starting Moltis so the auto-generated certificate includes it:
+
+```toml
+[tls]
+public_ip = "203.0.113.10"
+```
+
+Regular public TLS deployments should use a domain name.
+
+For internet-facing Docker deployments, prefer a domain name plus a reverse
+proxy with public CA certificates. Run Moltis with `--no-tls`, set
+`MOLTIS_BEHIND_PROXY=true`, and point the proxy at `http://<moltis-host>:13131`.
+If you want Moltis to serve HTTPS directly, mount a certificate and private key
+whose SANs cover the public hostname and set `tls.cert_path` and `tls.key_path`
+in `moltis.toml`.
 
 ```admonish note
 When accessing from localhost, no authentication is required. If you access Moltis from a different machine (e.g., over the network), a setup code is printed to the container logs for authentication setup:
@@ -110,9 +133,11 @@ For full container-level isolation (filesystem boundaries, network policies),
 mount the Docker socket.
 
 If Moltis is itself running in Docker and your `data_dir()` mount is backed by
-a different host path than `/home/moltis/.moltis`, Moltis will try to discover
-that host path automatically from `docker inspect`/`podman inspect`. If that
-lookup fails, add this to `/home/moltis/.config/moltis/moltis.toml` inside the
+a different host path than `/home/moltis/.moltis`, Moltis tries to discover that
+host path automatically from `docker inspect`/`podman inspect`. It first checks
+the current container's hostname/cgroup references, then scans running
+containers for an unambiguous mount of Moltis' data directory. If that lookup
+still fails, add this to `/home/moltis/.config/moltis/moltis.toml` inside the
 container:
 
 ```toml
@@ -121,8 +146,13 @@ host_data_dir = "/absolute/host/path/to/data"
 ```
 
 For a bind mount like `-v ./data:/home/moltis/.moltis`, use the resolved host
-path to `./data`. Restart Moltis after changing the config so new sandbox
-containers pick up the corrected mount source.
+path to `./data`. This setting is also used by sandboxed browser containers for
+their persistent Chrome profile directory. If browser startup logs show
+`/data/browser-profile/SingletonLock: Permission denied`, Moltis probably fell
+back to the in-container path (`/home/moltis/.moltis/...`) instead of the real
+host path. Set `host_data_dir` to the host-visible data directory and restart
+Moltis so new sandbox and browser containers pick up the corrected mount
+source.
 
 ### Security Consideration
 
@@ -133,7 +163,7 @@ Only run Moltis containers from trusted sources (official images from
 
 ## Docker Compose
 
-See [`examples/docker-compose.yml`](../examples/docker-compose.yml) for a
+See [`examples/docker-compose.yml`](https://github.com/moltis-org/moltis/blob/main/examples/docker-compose.yml) for a
 complete example:
 
 ```yaml
@@ -171,11 +201,15 @@ secrets:
 
 This lets encrypted environment variables and channel credentials load during
 startup. Treat the secret file as sensitive as the vault recovery key itself.
+If you create the secret file before the vault is initialized, Docker will
+accept the mount but Moltis cannot auto-unseal from an empty file. After you
+initialize the vault in **Settings > Encryption**, copy the one-time recovery
+key into this file before relying on unattended auto-unseal.
 
 ### Coolify (Hetzner/VPS)
 
 For Coolify service stacks, use
-[`examples/docker-compose.coolify.yml`](../examples/docker-compose.coolify.yml).
+[`examples/docker-compose.coolify.yml`](https://github.com/moltis-org/moltis/blob/main/examples/docker-compose.coolify.yml).
 It is preconfigured for reverse-proxy deployments (`--no-tls`) and includes
 the Docker socket mount for sandboxed command execution.
 
@@ -200,6 +234,14 @@ docker compose logs -f moltis  # watch for startup messages
 When Moltis runs inside Docker and launches a sandboxed browser, the browser
 container is a sibling container on the host. By default, Moltis connects to
 `127.0.0.1` which only reaches its own loopback, not the browser.
+
+The sibling browser also needs a host-visible mount for its Chrome profile. If
+your Moltis data directory is bind-mounted or stored somewhere that is not
+visible on the host as `/home/moltis/.moltis`, configure
+`[tools.exec.sandbox].host_data_dir` as described in
+[Docker Socket Sandbox Execution](#docker-socket-sandbox-execution). Without
+that override, Chrome may fail with `SingletonLock: Permission denied` when the
+browser container tries to write `/data/browser-profile`.
 
 Add `container_host` to your `moltis.toml` so Moltis can reach the browser
 container through the host's port mapping:

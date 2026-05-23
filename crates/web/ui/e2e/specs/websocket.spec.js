@@ -186,6 +186,55 @@ test.describe("WebSocket connection lifecycle", () => {
 		expect(resp.ok()).toBeTruthy();
 	});
 
+	test("RPC timeouts identify the slow method instead of reporting disconnect", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		const warnings = [];
+		page.on("console", (msg) => {
+			if (msg.type() === "warning") warnings.push(msg.text());
+		});
+		await page.goto("/");
+		await waitForWsConnected(page);
+
+		const res = await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const helpers = await import(`${prefix}js/helpers.js`);
+			const state = await import(`${prefix}js/state.js`);
+			const originalWs = state.ws;
+			const originalTimeout = window.__moltisTestRpcTimeoutMs;
+
+			try {
+				window.__moltisTestRpcTimeoutMs = 1_000;
+				state.setWs({
+					readyState: WebSocket.OPEN,
+					send() {
+						// Intentionally never resolves; this exercises the client timeout path.
+					},
+				});
+
+				return await helpers.sendRpc("test.slow_method", {});
+			} finally {
+				state.setWs(originalWs);
+				window.__moltisTestRpcTimeoutMs = originalTimeout;
+			}
+		});
+
+		expect(res).toMatchObject({
+			ok: false,
+			error: {
+				code: "TIMEOUT",
+			},
+		});
+		expect(res.error.message).toContain("test.slow_method");
+		expect(res.error.message).not.toContain("WebSocket disconnected");
+		expect(warnings.some((warning) => warning.includes("RPC request timed out"))).toBeTruthy();
+		expect(warnings.some((warning) => warning.includes("test.slow_method"))).toBeTruthy();
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("final chat text is kept when it includes tool output plus analysis", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await page.goto("/chats/main");
@@ -891,7 +940,9 @@ test.describe("WebSocket connection lifecycle", () => {
 					this.sent.push(JSON.parse(data));
 				}
 
-				close() {}
+				close() {
+					// Fake WebSocket used only for unit-style module testing.
+				}
 			}
 
 			const originalWebSocket = window.WebSocket;

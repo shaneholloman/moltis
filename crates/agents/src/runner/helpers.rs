@@ -9,7 +9,7 @@ use moltis_common::hooks::{ChannelBinding, HookAction, HookPayload, HookRegistry
 use crate::{
     model::{
         ChatMessage, ToolCall, ToolCallArgumentDiagnostic, ToolCallArgumentSource, Usage,
-        UserContent,
+        UserContent, provider_values_to_chat_messages,
     },
     response_sanitizer::clean_response,
     tool_loop_detector::{
@@ -266,6 +266,32 @@ pub(crate) fn log_tool_argument_diagnostic(
     }
 }
 
+pub(crate) fn apply_before_llm_call_modify_payload(
+    messages: &mut Vec<ChatMessage>,
+    modified_payload: serde_json::Value,
+) {
+    let Some(modified_messages) = modified_payload
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| modified_payload.as_array())
+    else {
+        warn!("BeforeLLMCall ModifyPayload missing messages array");
+        return;
+    };
+
+    let parsed = provider_values_to_chat_messages(modified_messages);
+    if parsed.is_empty() {
+        warn!("BeforeLLMCall ModifyPayload produced no valid messages; keeping original");
+        return;
+    }
+
+    *messages = parsed;
+    tracing::debug!(
+        messages_count = messages.len(),
+        "BeforeLLMCall ModifyPayload applied"
+    );
+}
+
 pub(crate) async fn dispatch_after_llm_call_hook(
     hook_registry: Option<&std::sync::Arc<HookRegistry>>,
     session_key: &str,
@@ -304,6 +330,39 @@ pub(crate) async fn dispatch_after_llm_call_hook(
         Ok(HookAction::Continue) => Ok(()),
         Err(e) => {
             warn!(error = %e, "AfterLLMCall hook dispatch failed");
+            Ok(())
+        },
+    }
+}
+
+pub(crate) async fn dispatch_before_agent_start_hook(
+    hook_registry: Option<&std::sync::Arc<HookRegistry>>,
+    session_key: &str,
+    model: &str,
+) -> Result<(), AgentRunError> {
+    let Some(hooks) = hook_registry else {
+        return Ok(());
+    };
+
+    let payload = HookPayload::BeforeAgentStart {
+        session_key: session_key.to_string(),
+        model: model.to_string(),
+    };
+
+    match hooks.dispatch(&payload).await {
+        Ok(HookAction::Block(reason)) => {
+            warn!(reason = %reason, "agent start blocked by BeforeAgentStart hook");
+            Err(AgentRunError::Other(anyhow::anyhow!(
+                "blocked by BeforeAgentStart hook: {reason}"
+            )))
+        },
+        Ok(HookAction::ModifyPayload(_)) => {
+            warn!("BeforeAgentStart ModifyPayload ignored (startup state is typed)");
+            Ok(())
+        },
+        Ok(HookAction::Continue) => Ok(()),
+        Err(e) => {
+            warn!(error = %e, "BeforeAgentStart hook dispatch failed");
             Ok(())
         },
     }

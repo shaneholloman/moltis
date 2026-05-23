@@ -122,8 +122,6 @@ test.describe("Session management", () => {
 	test("new session button creates a session", async ({ page }) => {
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
-		await expectRpcOk(page, "sessions.clear_all", {});
-		await expect.poll(() => topSessionKeysInSidebar(page, 1), { timeout: 10_000 }).toEqual(["main"]);
 		const sessionItems = page.locator("#sessionList .session-item");
 		// Wait for the session list to populate via RPC before capturing count
 		await expect(sessionItems.first()).toBeVisible();

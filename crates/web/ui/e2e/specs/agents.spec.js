@@ -46,6 +46,67 @@ async function deleteAgentByName(page, agentName) {
 	await expect(testCard).toHaveCount(0, { timeout: 10_000 });
 }
 
+async function mockExternalAgentsRpc(page) {
+	await page.addInitScript(() => {
+		if (window.__externalAgentE2EPatched) return;
+		window.__externalAgentE2EPatched = true;
+		window.__externalAgentE2ERequests = [];
+		const originalSend = WebSocket.prototype.send;
+
+		function respond(socket, id, payload) {
+			queueMicrotask(() => {
+				const event = new MessageEvent("message", {
+					data: JSON.stringify({ type: "res", id, ok: true, payload }),
+				});
+				if (typeof socket.onmessage === "function") socket.onmessage(event);
+			});
+		}
+
+		WebSocket.prototype.send = function (payload) {
+			try {
+				var parsed = JSON.parse(payload);
+				if (parsed?.method === "external_agents.list") {
+					window.__externalAgentE2ERequests.push({ method: parsed.method, params: parsed.params || {} });
+					respond(this, parsed.id, [
+						{ kind: "codex", name: "Codex", installed: true, version: null },
+						{ kind: "claude-code", name: "Claude Code", installed: false, version: null },
+					]);
+					return;
+				}
+				if (parsed?.method === "external_agents.bind") {
+					window.__externalAgentE2ERequests.push({ method: parsed.method, params: parsed.params || {} });
+					respond(this, parsed.id, { ok: true, sessionKey: parsed.params?.sessionKey, kind: parsed.params?.kind });
+					return;
+				}
+				if (parsed?.method === "external_agents.unbind") {
+					window.__externalAgentE2ERequests.push({ method: parsed.method, params: parsed.params || {} });
+					respond(this, parsed.id, { ok: true, sessionKey: parsed.params?.sessionKey });
+					return;
+				}
+			} catch (_err) {
+				// Fall through to the original sender.
+			}
+			return originalSend.call(this, payload);
+		};
+	});
+}
+
+async function expectActiveSessionExternalAgent(page, kind) {
+	await expect
+		.poll(
+			async () =>
+				page.evaluate((nextKind) => {
+					const session = window.__moltis_stores?.sessionStore?.activeSession?.value;
+					if (!session) return undefined;
+					session.external_agent_kind = nextKind;
+					session.dataVersion.value++;
+					return session.external_agent_kind;
+				}, kind),
+			{ timeout: 10_000 },
+		)
+		.toBe(kind);
+}
+
 test.describe("Agents settings page", () => {
 	test("settings/agents loads and shows heading", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
@@ -262,6 +323,50 @@ test.describe("Agents settings page", () => {
 		await testCard.getByRole("button", { name: "Delete", exact: true }).click();
 		await page.locator(".provider-modal").getByRole("button", { name: "Delete", exact: true }).click();
 		await expect(testCard).toHaveCount(0, { timeout: 10_000 });
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("external-agent binding RPC binds and unbinds a session", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await mockExternalAgentsRpc(page);
+		await page.goto("/chats");
+		await expectPageContentMounted(page);
+		await waitForWsConnected(page);
+		await createSession(page);
+
+		const sessionKey = await page.evaluate(() => window.__moltis_stores?.sessionStore?.activeSessionKey?.value || "");
+		const bindResponse = await sendRpcFromPage(page, "external_agents.bind", { sessionKey, kind: "codex" });
+		expect(bindResponse?.ok).toBe(true);
+		await expect
+			.poll(
+				async () =>
+					page.evaluate(() =>
+						(window.__externalAgentE2ERequests || []).some(
+							(req) => req.method === "external_agents.bind" && req.params?.kind === "codex",
+						),
+					),
+				{ timeout: 10_000 },
+			)
+			.toBe(true);
+		await expectActiveSessionExternalAgent(page, "codex");
+
+		const unbindResponse = await sendRpcFromPage(page, "external_agents.unbind", { sessionKey });
+		expect(unbindResponse?.ok).toBe(true);
+		await expect
+			.poll(
+				async () =>
+					page.evaluate(
+						(key) =>
+							(window.__externalAgentE2ERequests || []).some(
+								(req) => req.method === "external_agents.unbind" && req.params?.sessionKey === key,
+							),
+						sessionKey,
+					),
+				{ timeout: 10_000 },
+			)
+			.toBe(true);
+		await expectActiveSessionExternalAgent(page, null);
 
 		expect(pageErrors).toEqual([]);
 	});

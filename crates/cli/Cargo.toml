@@ -20,6 +20,11 @@ assets = [
     "644",
   ],
   [
+    "../../docs/src/**/*",
+    "usr/share/moltis/docs/",
+    "644",
+  ],
+  [
     "target/release/moltis_wasm_calc.wasm",
     "usr/share/moltis/wasm/",
     "644",
@@ -45,6 +50,7 @@ section = "net"
 [package.metadata.generate-rpm]
 assets = [
   { dest = "/usr/bin/moltis", mode = "0755", source = "target/release/moltis" },
+  { dest = "/usr/share/moltis/docs/", mode = "0644", source = "docs/src/**/*" },
   { dest = "/usr/share/moltis/wasm/", mode = "0644", source = "target/wasm32-wasip2/release/moltis_wasm_calc.wasm" },
   { dest = "/usr/share/moltis/wasm/", mode = "0644", source = "target/wasm32-wasip2/release/moltis_wasm_web_fetch.wasm" },
   { dest = "/usr/share/moltis/wasm/", mode = "0644", source = "target/wasm32-wasip2/release/moltis_wasm_web_search.wasm" },
@@ -106,9 +112,10 @@ tikv-jemallocator = { optional = true, workspace = true }
 tempfile = { workspace = true }
 
 [features]
-agent          = ["moltis-gateway/agent", "moltis-web?/agent"]
-caldav         = ["moltis-gateway/caldav"]
-home-assistant = ["moltis-gateway/home-assistant"]
+agent             = ["moltis-gateway/agent", "moltis-web?/agent"]
+caldav            = ["moltis-gateway/caldav"]
+cloudflare-tunnel = ["moltis-httpd/cloudflare-tunnel", "moltis-web?/cloudflare-tunnel"]
+home-assistant    = ["moltis-gateway/home-assistant"]
 # User-facing integrations stay default-on in the CLI crate per workspace policy,
 # even when the underlying implementation remains feature-gated in lower crates.
 #
@@ -123,6 +130,7 @@ full = [
   "bundled-skills",
   "caldav",
   "claude-import",
+  "cloudflare-tunnel",
   "code-index-builtin",
   "code-splitter",
   "codex-import",
@@ -157,6 +165,7 @@ full = [
   "mdns",
   "metrics",
   "msteams",
+  "netbird",
   "ngrok",
   "nostr",
   "openclaw-import",
@@ -221,6 +230,7 @@ matrix                = ["moltis-httpd/matrix"]
 mdns                  = ["moltis-gateway/mdns"]
 metrics               = ["moltis-httpd/metrics", "moltis-web?/metrics"]
 msteams               = ["moltis-httpd/msteams"]
+netbird               = ["moltis-httpd/netbird", "moltis-web?/netbird"]
 ngrok                 = ["moltis-httpd/ngrok", "moltis-web?/ngrok"]
 nostr                 = ["moltis-httpd/nostr"]
 openclaw-import       = ["dep:moltis-openclaw-import", "moltis-gateway/openclaw-import"]

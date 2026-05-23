@@ -5,11 +5,24 @@ use {
 };
 
 /// Authentication configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     /// When true, authentication is explicitly disabled (no login required).
     pub disabled: bool,
+
+    /// When true, stored secrets are encrypted at rest using the password-backed vault.
+    #[serde(default = "default_true")]
+    pub vault_enabled: bool,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            disabled: false,
+            vault_enabled: true,
+        }
+    }
 }
 
 /// Runtime GraphQL server configuration.
@@ -169,6 +182,14 @@ pub struct McpServerEntry {
 pub struct McpOAuthOverrideEntry {
     /// The OAuth client ID.
     pub client_id: String,
+    /// Optional OAuth client secret sent to the token endpoint.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serialize_option_secret",
+        deserialize_with = "super::deserialize_option_secret"
+    )]
+    pub client_secret: Option<Secret<String>>,
     /// The authorization endpoint URL.
     pub auth_url: String,
     /// The token endpoint URL.
@@ -365,6 +386,8 @@ pub struct TlsConfig {
     pub key_path: Option<String>,
     /// Path to the CA certificate (PEM) used for trust instructions.
     pub ca_cert_path: Option<String>,
+    /// Public IP address to include as an IP SAN in auto-generated certificates.
+    pub public_ip: Option<String>,
     /// Port for the plain-HTTP redirect/CA-download server.
     /// Defaults to the gateway port + 1 when not set.
     pub http_redirect_port: Option<u16>,
@@ -378,6 +401,7 @@ impl Default for TlsConfig {
             cert_path: None,
             key_path: None,
             ca_cert_path: None,
+            public_ip: None,
             http_redirect_port: None,
         }
     }

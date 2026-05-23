@@ -20,7 +20,9 @@ use moltis_gateway::{auth::CredentialStore, state::GatewayState};
 
 #[cfg(feature = "vault")]
 pub(super) async fn vault_status_handler(State(state): State<AuthState>) -> impl IntoResponse {
-    let status = if let Some(ref vault) = state.gateway_state.vault {
+    let status = if !moltis_gateway::vault_lifecycle::is_vault_encryption_runtime_enabled() {
+        "disabled".to_owned()
+    } else if let Some(ref vault) = state.gateway_state.vault {
         match vault.status().await {
             Ok(s) => format!("{s:?}").to_lowercase(),
             Err(_) => "error".to_owned(),
@@ -29,6 +31,57 @@ pub(super) async fn vault_status_handler(State(state): State<AuthState>) -> impl
         "disabled".to_owned()
     };
     Json(serde_json::json!({ "status": status }))
+}
+
+#[cfg(feature = "vault")]
+#[derive(serde::Deserialize)]
+pub(super) struct VaultInitializeRequest {
+    password: String,
+}
+
+#[cfg(feature = "vault")]
+pub(super) async fn vault_initialize_handler(
+    _session: crate::auth_middleware::AuthSession,
+    State(state): State<AuthState>,
+    Json(body): Json<VaultInitializeRequest>,
+) -> impl IntoResponse {
+    if !moltis_gateway::vault_lifecycle::is_vault_encryption_runtime_enabled() {
+        return (StatusCode::NOT_FOUND, "vault not available").into_response();
+    }
+    if state.gateway_state.vault.is_none() {
+        return (StatusCode::NOT_FOUND, "vault not available").into_response();
+    }
+
+    match state
+        .credential_store
+        .initialize_vault_for_current_password(&body.password)
+        .await
+    {
+        Ok(outcome) => {
+            let status = if outcome.unsealed {
+                "unsealed"
+            } else {
+                "sealed"
+            };
+            if outcome.unsealed {
+                run_vault_env_migration(&state).await;
+                start_stored_channels_on_vault_unseal(&state).await;
+            }
+            Json(serde_json::json!({
+                "ok": true,
+                "recovery_key": outcome.recovery_key.phrase(),
+                "status": status,
+            }))
+            .into_response()
+        },
+        Err(moltis_gateway::auth::VaultInitializeError::IncorrectCurrentPassword) => {
+            (StatusCode::FORBIDDEN, "current password is incorrect").into_response()
+        },
+        Err(moltis_gateway::auth::VaultInitializeError::AlreadyInitialized) => {
+            (StatusCode::CONFLICT, "vault is already initialized").into_response()
+        },
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
 }
 
 #[cfg(feature = "vault")]
@@ -42,6 +95,9 @@ pub(super) async fn vault_unlock_handler(
     State(state): State<AuthState>,
     Json(body): Json<VaultUnlockRequest>,
 ) -> impl IntoResponse {
+    if !moltis_gateway::vault_lifecycle::is_vault_encryption_runtime_enabled() {
+        return (StatusCode::NOT_FOUND, "vault not available").into_response();
+    }
     let Some(ref vault) = state.gateway_state.vault else {
         return (StatusCode::NOT_FOUND, "vault not available").into_response();
     };
@@ -69,6 +125,9 @@ pub(super) async fn vault_recovery_handler(
     State(state): State<AuthState>,
     Json(body): Json<VaultRecoveryRequest>,
 ) -> impl IntoResponse {
+    if !moltis_gateway::vault_lifecycle::is_vault_encryption_runtime_enabled() {
+        return (StatusCode::NOT_FOUND, "vault not available").into_response();
+    }
     let Some(ref vault) = state.gateway_state.vault else {
         return (StatusCode::NOT_FOUND, "vault not available").into_response();
     };
@@ -82,6 +141,68 @@ pub(super) async fn vault_recovery_handler(
             (StatusCode::LOCKED, "invalid recovery key").into_response()
         },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[cfg(feature = "vault")]
+#[derive(serde::Deserialize)]
+pub(super) struct VaultDisableRequest {
+    password: Option<String>,
+}
+
+#[cfg(feature = "vault")]
+pub(super) async fn vault_disable_handler(
+    _session: crate::auth_middleware::AuthSession,
+    State(state): State<AuthState>,
+    Json(body): Json<VaultDisableRequest>,
+) -> impl IntoResponse {
+    if !moltis_gateway::vault_lifecycle::is_vault_encryption_runtime_enabled() {
+        return (StatusCode::NOT_FOUND, "vault not available").into_response();
+    }
+    let Some(ref vault) = state.gateway_state.vault else {
+        return (StatusCode::NOT_FOUND, "vault not available").into_response();
+    };
+
+    if !vault.is_unsealed().await {
+        let Some(password) = body
+            .password
+            .as_deref()
+            .filter(|password| !password.is_empty())
+        else {
+            return (StatusCode::LOCKED, "unlock the vault before disabling it").into_response();
+        };
+        if let Err(error) = vault.unseal(password).await {
+            return match error {
+                moltis_vault::VaultError::BadCredential => {
+                    (StatusCode::LOCKED, "invalid password").into_response()
+                },
+                other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()).into_response(),
+            };
+        }
+    }
+
+    match moltis_gateway::vault_lifecycle::disable_vault_and_decrypt_all(
+        vault,
+        state.credential_store.db_pool(),
+    )
+    .await
+    {
+        Ok(report) => {
+            vault.seal().await;
+            state.credential_store.disable_vault_encryption();
+            Json(serde_json::json!({
+                "ok": true,
+                "report": {
+                    "env_vars": report.env_vars,
+                    "ssh_keys": report.ssh_keys,
+                    "channels": report.channels,
+                    "webhooks": report.webhooks,
+                    "provider_keys": report.provider_keys,
+                }
+            }))
+            .into_response()
+        },
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
 }
 

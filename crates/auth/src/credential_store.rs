@@ -26,6 +26,9 @@ pub use {
     util::is_loopback,
 };
 
+#[cfg(feature = "vault")]
+pub use sessions::{PasswordVaultChangeError, VaultInitializeError, VaultInitializeOutcome};
+
 /// Single-user credential store backed by SQLite.
 pub struct CredentialStore {
     pool: SqlitePool,
@@ -36,4 +39,6 @@ pub struct CredentialStore {
     /// Encryption-at-rest vault for environment variables.
     #[cfg(feature = "vault")]
     vault: Option<Arc<Vault>>,
+    #[cfg(feature = "vault")]
+    vault_encryption_enabled: AtomicBool,
 }

@@ -369,6 +369,92 @@ pub(super) async fn password_change_initializes_vault() {
     assert!(store.verify_password(&new_password).await.unwrap());
 }
 
+/// Passwords migrated from the environment can initialize an existing but
+/// uninitialized vault without removing authentication.
+#[cfg(all(feature = "web-ui", feature = "vault"))]
+#[tokio::test]
+pub(super) async fn vault_initialize_uses_existing_password() {
+    let (addr, store, _state, vault) = start_localhost_server_with_vault().await;
+    let password = generated_password();
+    store.set_initial_password(&password).await.unwrap();
+    let token = store.create_session().await.unwrap();
+
+    assert_eq!(
+        vault.status().await.unwrap(),
+        moltis_vault::VaultStatus::Uninitialized
+    );
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/auth/vault/initialize"))
+        .header("Content-Type", "application/json")
+        .header("Cookie", format!("moltis_session={token}"))
+        .body(json_password(&password))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["status"], "unsealed");
+    assert!(
+        body["recovery_key"]
+            .as_str()
+            .is_some_and(|key| !key.is_empty())
+    );
+    assert_eq!(
+        vault.status().await.unwrap(),
+        moltis_vault::VaultStatus::Unsealed
+    );
+}
+
+#[cfg(all(feature = "web-ui", feature = "vault"))]
+#[tokio::test]
+pub(super) async fn vault_initialize_rejects_wrong_password() {
+    let (addr, store, _state, vault) = start_localhost_server_with_vault().await;
+    let password = generated_password();
+    let wrong_password = different_password(&password);
+    store.set_initial_password(&password).await.unwrap();
+    let token = store.create_session().await.unwrap();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/auth/vault/initialize"))
+        .header("Content-Type", "application/json")
+        .header("Cookie", format!("moltis_session={token}"))
+        .body(json_password(&wrong_password))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(
+        vault.status().await.unwrap(),
+        moltis_vault::VaultStatus::Uninitialized
+    );
+}
+
+#[cfg(all(feature = "web-ui", feature = "vault"))]
+#[tokio::test]
+pub(super) async fn vault_initialize_rejects_already_initialized_vault() {
+    let (addr, store, _state, vault) = start_localhost_server_with_vault().await;
+    let password = generated_password();
+    store.set_initial_password(&password).await.unwrap();
+    let token = store.create_session().await.unwrap();
+    let _rk = vault.initialize(&password).await.unwrap();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/auth/vault/initialize"))
+        .header("Content-Type", "application/json")
+        .header("Cookie", format!("moltis_session={token}"))
+        .body(json_password(&password))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+}
+
 /// Setting a password via /api/auth/password/change when the vault is already
 /// initialized should not return a recovery key (no double-init).
 #[cfg(all(feature = "web-ui", feature = "vault"))]
@@ -406,6 +492,107 @@ pub(super) async fn password_change_on_initialized_vault_no_recovery_key() {
     );
 
     assert!(store.has_password().await.unwrap());
+    vault.seal().await;
+    assert!(vault.unseal(&new_password).await.is_ok());
+}
+
+/// After auth reset, setting a different auth password while the existing vault
+/// is sealed would create a password/vault mismatch. Reject it instead.
+#[cfg(all(feature = "web-ui", feature = "vault"))]
+#[tokio::test]
+pub(super) async fn first_password_rejects_sealed_vault_password_mismatch() {
+    let (addr, store, _state, vault) = start_localhost_server_with_vault().await;
+    let vault_password = generated_password();
+    let new_password = different_password(&vault_password);
+
+    let _rk = vault.initialize(&vault_password).await.unwrap();
+    vault.seal().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/auth/password/change"))
+        .header("Content-Type", "application/json")
+        .body(json_new_password(&new_password))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 423);
+
+    assert!(!store.has_password().await.unwrap());
+    assert!(vault.unseal(&vault_password).await.is_ok());
+}
+
+/// Changing the auth password while the vault is sealed should first unseal and
+/// re-wrap the vault DEK, keeping the login and vault passwords in sync.
+#[cfg(all(feature = "web-ui", feature = "vault"))]
+#[tokio::test]
+pub(super) async fn password_change_rotates_sealed_vault_password() {
+    let (addr, store, _state, vault) = start_localhost_server_with_vault().await;
+    let current_password = generated_password();
+    let new_password = generated_password();
+
+    store.set_initial_password(&current_password).await.unwrap();
+    let token = store.create_session().await.unwrap();
+    let _rk = vault.initialize(&current_password).await.unwrap();
+    vault.seal().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/auth/password/change"))
+        .header("Content-Type", "application/json")
+        .header("Cookie", format!("moltis_session={token}"))
+        .body(
+            serde_json::json!({
+                "current_password": current_password,
+                "new_password": new_password,
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    assert!(store.verify_password(&new_password).await.unwrap());
+    vault.seal().await;
+    assert!(vault.unseal(&new_password).await.is_ok());
+}
+
+/// If auth and vault passwords are already out of sync, changing the auth
+/// password must fail instead of making the split-brain state worse.
+#[cfg(all(feature = "web-ui", feature = "vault"))]
+#[tokio::test]
+pub(super) async fn password_change_rejects_mismatched_vault_password() {
+    let (addr, store, _state, vault) = start_localhost_server_with_vault().await;
+    let auth_password = generated_password();
+    let vault_password = different_password(&auth_password);
+    let new_password = generated_password();
+
+    store.set_initial_password(&auth_password).await.unwrap();
+    let token = store.create_session().await.unwrap();
+    let _rk = vault.initialize(&vault_password).await.unwrap();
+    vault.seal().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/auth/password/change"))
+        .header("Content-Type", "application/json")
+        .header("Cookie", format!("moltis_session={token}"))
+        .body(
+            serde_json::json!({
+                "current_password": auth_password,
+                "new_password": new_password,
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 423);
+
+    assert!(store.verify_password(&auth_password).await.unwrap());
+    assert!(!store.verify_password(&new_password).await.unwrap());
+    assert!(vault.unseal(&vault_password).await.is_ok());
 }
 
 /// Bootstrap remains available when the vault is sealed because it does not

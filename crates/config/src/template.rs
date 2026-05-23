@@ -65,6 +65,8 @@ port = {port}                           # Port number (auto-generated for this i
 # [auth]
 # disabled = false                  # true = disable auth entirely (DANGEROUS if exposed)
                                     # When disabled, anyone with network access can use moltis
+# vault_enabled = true              # true = encrypt stored secrets at rest using the password vault
+#                                   # Set false to keep password auth without requiring vault unlocks after restart.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GRAPHQL
@@ -81,6 +83,7 @@ port = {port}                           # Port number (auto-generated for this i
 # [tls]
 # enabled = true                    # Enable HTTPS (recommended)
 # auto_generate = true              # Auto-generate local CA and server certificate
+# public_ip = "203.0.113.10"        # Optional IP SAN for direct https://IP access
 # http_redirect_port = 18790        # Optional override (default: server.port + 1)
 # cert_path = "/path/to/cert.pem"   # Custom certificate file (overrides auto-gen)
 # key_path = "/path/to/key.pem"     # Custom private key file
@@ -395,6 +398,7 @@ port = {port}                           # Port number (auto-generated for this i
 # no_network = true                 # Disable network access in sandbox
 # image = "custom-image:tag"        # Custom Docker image (default: auto-built)
 # packages = [...]                  # Packages installed in sandbox containers
+# host_data_dir = "/host/moltis-data" # Host path for Moltis data when running Moltis inside Docker
 # gpus = "all"                      # GPU passthrough: "all", "device=0", "device=0,1"
                                     # (Docker/Podman only, ignored for other backends)
 
@@ -491,6 +495,13 @@ port = {port}                           # Port number (auto-generated for this i
 # env = {{ KEY = "value" }}           # Environment variables
 # transport = "stdio"               # "stdio" | "sse" | "streamable-http"
 
+# [mcp.servers.server-name.oauth]
+# client_id = "your-client-id"       # Manual OAuth client ID
+# client_secret = "your-secret"      # Optional secret for token exchange
+# auth_url = "https://auth.example.com/authorize"
+# token_url = "https://auth.example.com/token"
+# scopes = ["mcp:read"]
+
 # ══════════════════════════════════════════════════════════════════════════════
 # METRICS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -573,6 +584,11 @@ port = {port}                           # Port number (auto-generated for this i
 # authtoken = "${{NGROK_AUTHTOKEN}}"
 # domain = "team-gateway.ngrok.app"
 
+# [cloudflare_tunnel]
+# enabled = false
+# token = "${{CLOUDFLARE_TUNNEL_TOKEN}}"
+# hostname = "moltis.example.com"       # Optional public hostname for display/passkeys
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAILSCALE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -580,6 +596,9 @@ port = {port}                           # Port number (auto-generated for this i
 # [tailscale]
 # mode = "off"                      # "off" | "serve" | "funnel"
 # reset_on_exit = true
+
+# [netbird]
+# mode = "off"                      # "off" | "serve" (private mesh only)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MEMORY / EMBEDDINGS
@@ -615,6 +634,39 @@ port = {port}                           # Port number (auto-generated for this i
 # [phone.plivo]
 # from_number = "+15551234567"              # Your Plivo phone number (E.164)
 # webhook_url = "https://your-domain.com"   # Public URL for Plivo callbacks
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXTERNAL AGENTS
+# ══════════════════════════════════════════════════════════════════════════════
+# Connect Moltis chat sessions to external CLI coding agents.
+# Codex and ACP use persistent JSON-RPC sessions; Claude Code uses print-mode
+# resume when the CLI returns a session_id.
+# Moltis acts as orchestrator; the CLI agent owns its own context window.
+
+[external_agents]
+# enabled = false                   # Enable external agent bridge
+
+# Per-agent configuration (key = agent kind)
+# [external_agents.agents.claude-code]
+# binary = "claude"                 # Override binary path (default: look up on $PATH)
+# args = ["-p", "--output-format", "json"]
+# working_dir = "."                 # Override working directory
+# timeout_secs = 300                # Session timeout
+# use_tmux = false                  # Force tmux backend (vs direct PTY)
+# [external_agents.agents.claude-code.env]
+# ANTHROPIC_API_KEY = "sk-..."      # Extra env vars for this agent
+
+# [external_agents.agents.codex]
+# binary = "codex"
+# args = ["app-server"]
+
+# [external_agents.agents.acp]
+# binary = "/path/to/acp-agent"
+# args = []
+
+# [external_agents.agents.opencode]
+# binary = "opencode"
+# use_tmux = true                   # opencode requires tmux (TUI app)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CHANNELS

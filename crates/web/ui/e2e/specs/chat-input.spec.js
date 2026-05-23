@@ -608,31 +608,134 @@ test.describe("Chat input and slash commands", () => {
 			.toBe("/sh echo hello");
 	});
 
+	test("attaches arbitrary files with metadata", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.route("**/api/sessions/main/upload", async (route) => {
+			const request = route.request();
+			const body = request.postDataBuffer() || Buffer.alloc(0);
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					ok: true,
+					url: "/api/sessions/main/media/calendar.ics",
+					filename: "calendar.ics",
+					contentType: request.headers()["content-type"] || "text/calendar",
+					size: body.length,
+				}),
+			});
+		});
+		await page.evaluate(() => {
+			window.__fileAttachmentPayloads = [];
+			if (window.__fileAttachmentWsSpyInstalled) return;
+			var originalSend = WebSocket.prototype.send;
+			WebSocket.prototype.send = function (data) {
+				try {
+					var parsed = JSON.parse(data);
+					if (parsed?.method === "chat.send") {
+						window.__fileAttachmentPayloads.push(parsed.params || {});
+					}
+				} catch {
+					// ignore non-JSON payloads
+				}
+				return originalSend.call(this, data);
+			};
+			window.__fileAttachmentWsSpyInstalled = true;
+		});
+
+		await page.locator("#attachInput").setInputFiles({
+			name: "calendar.ics",
+			mimeType: "text/calendar",
+			buffer: Buffer.from("BEGIN:VCALENDAR\nEND:VCALENDAR\n"),
+		});
+		await expect(page.locator(".media-preview-item")).toContainText("calendar.ics");
+		await expect(page.locator(".media-preview-item")).toContainText("30 B");
+
+		await page.locator("#chatInput").fill("please inspect this");
+		await page.locator("#chatInput").press("Enter");
+		await expect(page.locator(".document-container")).toContainText("calendar.ics");
+
+		await expect
+			.poll(
+				async () =>
+					await page.evaluate(() => {
+						var payloads = window.__fileAttachmentPayloads || [];
+						var last = payloads[payloads.length - 1];
+						return last?._document_files?.[0] || null;
+					}),
+				{ timeout: 5_000 },
+			)
+			.toMatchObject({
+				display_name: "calendar.ics",
+				stored_filename: "calendar.ics",
+				mime_type: "text/calendar",
+				size_bytes: 30,
+			});
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("preserves typed text when attachment upload fails", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.route("**/api/sessions/main/upload", async (route) => {
+			await route.fulfill({
+				status: 500,
+				contentType: "application/json",
+				body: JSON.stringify({ ok: false, error: "upload failed" }),
+			});
+		});
+
+		await page.locator("#attachInput").setInputFiles({
+			name: "broken.ics",
+			mimeType: "text/calendar",
+			buffer: Buffer.from("BEGIN:VCALENDAR\nEND:VCALENDAR\n"),
+		});
+		await page.locator("#chatInput").fill("do not lose this");
+		await page.locator("#chatInput").press("Enter");
+
+		await expect(page.locator(".msg.error")).toContainText("File upload failed");
+		await expect(page.locator("#chatInput")).toHaveValue("do not lose this");
+		await expect(page.locator(".media-preview-item")).toContainText("broken.ics");
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("token bar stays visible at zero usage", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 
-		await page.evaluate(async () => {
-			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app module script not found");
-			var appUrl = new URL(appScript.src, window.location.origin);
-			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-			var state = await import(`${prefix}js/state.js`);
-			var chatUi = await import(`${prefix}js/chat-ui.js`);
-			state.setSessionTokens({ input: 0, output: 0 });
-			state.setSessionCurrentContextTokens(0);
-			state.setSessionContextWindow(0);
-			state.setSessionToolsEnabled(true);
-			state.setSessionExecMode("host");
-			state.setSessionExecPromptSymbol("$");
-			state.setCommandModeEnabled(false);
-			chatUi.updateTokenBar();
-		});
+		async function forceZeroUsageTokenBar() {
+			return await page.evaluate(async () => {
+				var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+				if (!appScript) throw new Error("app module script not found");
+				var appUrl = new URL(appScript.src, window.location.origin);
+				var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+				var state = await import(`${prefix}js/state.js`);
+				var chatUi = await import(`${prefix}js/chat-ui.js`);
+				state.setSessionTokens({ input: 0, output: 0 });
+				state.setSessionCurrentInputTokens(0);
+				state.setSessionCurrentContextTokens(0);
+				state.setSessionContextWindow(0);
+				state.setSessionToolsEnabled(true);
+				state.setSessionExecMode("host");
+				state.setSessionExecPromptSymbol("$");
+				state.setCommandModeEnabled(false);
+				chatUi.updateTokenBar();
+				var bar = document.querySelector("#tokenBar");
+				if (!bar) return { visible: false, text: "", hasExec: false, hasCommandMode: false };
+				var text = bar.textContent || "";
+				return {
+					visible: window.getComputedStyle(bar).display !== "none",
+					text,
+					hasExec: text.includes("Execute:"),
+					hasCommandMode: text.includes("/sh mode"),
+				};
+			});
+		}
 
-		const tokenBar = page.locator("#tokenBar");
-		await expect(tokenBar).toBeVisible();
-		await expect(tokenBar).toHaveText(/^(0)?$/);
-		await expect(tokenBar).not.toContainText("Execute:");
-		await expect(tokenBar).not.toContainText("/sh mode");
+		await expect.poll(forceZeroUsageTokenBar, { timeout: 10_000 }).toEqual({
+			visible: true,
+			text: "0",
+			hasExec: false,
+			hasCommandMode: false,
+		});
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -681,26 +784,29 @@ test.describe("Chat input and slash commands", () => {
 	test("token bar shows current context tokens and context used", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 
-		const tokenBarText = await page.evaluate(async () => {
-			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app module script not found");
-			var appUrl = new URL(appScript.src, window.location.origin);
-			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-			var state = await import(`${prefix}js/state.js`);
-			var chatUi = await import(`${prefix}js/chat-ui.js`);
-			state.setSessionTokens({ input: 200000, output: 0 });
-			state.setSessionCurrentInputTokens(50000);
-			state.setSessionCurrentContextTokens(62000);
-			state.setSessionContextWindow(200000);
-			state.setSessionToolsEnabled(true);
-			chatUi.updateTokenBar();
-			var tokenBar = document.getElementById("tokenBar");
-			return tokenBar ? tokenBar.textContent || "" : "";
-		});
+		await expect
+			.poll(async () => {
+				return await page.evaluate(async () => {
+					var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+					if (!appScript) throw new Error("app module script not found");
+					var appUrl = new URL(appScript.src, window.location.origin);
+					var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+					var state = await import(`${prefix}js/state.js`);
+					var chatUi = await import(`${prefix}js/chat-ui.js`);
+					state.setSessionTokens({ input: 200000, output: 0 });
+					state.setSessionCurrentInputTokens(50000);
+					state.setSessionCurrentContextTokens(62000);
+					state.setSessionContextWindow(200000);
+					state.setSessionToolsEnabled(true);
+					chatUi.updateTokenBar();
+					var tokenBar = document.getElementById("tokenBar");
+					return tokenBar && tokenBar.offsetParent !== null ? tokenBar.textContent || "" : "";
+				});
+			})
+			.toBe("62.0K (31%)");
 
 		const tokenBar = page.locator("#tokenBar");
 		await expect(tokenBar).toBeVisible();
-		expect(tokenBarText).toBe("62.0K (31%)");
 		expect(pageErrors).toEqual([]);
 	});
 
@@ -832,18 +938,21 @@ test.describe("Chat input and slash commands", () => {
 	test("/clear resets client chat sequence", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await setChatSeq(page, 8);
-		await page.evaluate(async () => {
-			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app module script not found");
-			var appUrl = new URL(appScript.src, window.location.origin);
-			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-			var state = await import(`${prefix}js/state.js`);
-			var chatUi = await import(`${prefix}js/chat-ui.js`);
-			state.setSessionCurrentContextTokens(62000);
-			state.setSessionContextWindow(200000);
-			chatUi.updateTokenBar();
-		});
-		await expect(page.locator("#tokenBar")).toContainText("62.0K (31%)");
+		async function forceContextTokenBar() {
+			return await page.evaluate(async () => {
+				var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+				if (!appScript) throw new Error("app module script not found");
+				var appUrl = new URL(appScript.src, window.location.origin);
+				var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+				var state = await import(`${prefix}js/state.js`);
+				var chatUi = await import(`${prefix}js/chat-ui.js`);
+				state.setSessionCurrentContextTokens(62000);
+				state.setSessionContextWindow(200000);
+				chatUi.updateTokenBar();
+				return document.querySelector("#tokenBar")?.textContent || "";
+			});
+		}
+		await expect.poll(forceContextTokenBar, { timeout: 10_000 }).toContain("62.0K (31%)");
 
 		const reset = await runClearSlashCommandWithRetry(page);
 		expect(reset).toBeTruthy();

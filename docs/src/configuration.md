@@ -53,6 +53,20 @@ implementation. Moltis regenerates `defaults.toml` from those built-in defaults
 on startup, while `moltis.toml` should contain only values you intentionally
 override.
 
+## Agent-Readable Docs
+
+Moltis packages the documentation as local markdown files when the install
+format supports external share files, such as `.deb`, `.rpm`, Homebrew, and
+similar system packages. Agents are pointed at those local files through the
+system prompt so they can read setup, configuration, channel, and
+troubleshooting docs without needing web access.
+
+Resolution order is `MOLTIS_DOCS_DIR`, the packaged share docs directory
+(`<share>/docs`), the source checkout docs in development, then an embedded
+fallback copied to `~/.moltis/docs/moltis/`. Moltis also writes a generated
+`config-template.md` under `~/.moltis/docs/moltis/` for the current server port
+and points agents at it separately.
+
 ## Basic Settings
 
 ```toml
@@ -384,7 +398,11 @@ See [Slack](slack.md) for full configuration reference and setup instructions.
 enabled = true
 cert_path = "~/.config/moltis/cert.pem"
 key_path = "~/.config/moltis/key.pem"
-# If paths don't exist, a self-signed certificate is generated
+# If custom paths are not set and auto_generate is true, Moltis generates a
+# local CA and server certificate for localhost/private-network names. Public
+# VPS IP access should set public_ip; public domains should use a reverse proxy
+# or custom CA-issued certificates.
+# public_ip = "203.0.113.10"
 
 # Port for the plain-HTTP redirect / CA-download server.
 # Defaults to the server port + 1 when not set.

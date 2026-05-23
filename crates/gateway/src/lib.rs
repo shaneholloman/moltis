@@ -25,6 +25,7 @@ pub mod channel_webhook_rate_limit;
 pub mod chat;
 pub mod chat_error;
 pub mod cron;
+pub mod external_agents;
 #[cfg(feature = "local-llm")]
 pub mod local_llm_setup;
 pub mod logs;
@@ -35,6 +36,8 @@ pub mod mcp_service;
 pub mod mdns;
 pub mod message_log_store;
 pub mod methods;
+#[cfg(feature = "netbird")]
+pub mod netbird;
 pub mod network_audit;
 pub mod node_exec;
 pub mod nodes;

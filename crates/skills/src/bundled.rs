@@ -764,6 +764,52 @@ mod tests {
     }
 
     #[test]
+    fn slacrawl_install_metadata_uses_openclaw_sources() {
+        let skills = store().discover();
+        let slacrawl = skills
+            .iter()
+            .find(|s| s.name == "slacrawl")
+            .expect("slacrawl should be bundled");
+
+        let modules: Vec<&str> = slacrawl
+            .requires
+            .install
+            .iter()
+            .filter_map(|install| install.module.as_deref())
+            .collect();
+
+        assert_eq!(
+            slacrawl.homepage.as_deref(),
+            Some("https://github.com/openclaw/slacrawl")
+        );
+        assert!(
+            slacrawl
+                .requires
+                .install
+                .iter()
+                .any(|install| install.formula.as_deref() == Some("openclaw/tap/slacrawl"))
+        );
+        assert!(modules.contains(&"github.com/openclaw/slacrawl/cmd/slacrawl@latest"));
+        assert!(
+            !slacrawl
+                .homepage
+                .as_deref()
+                .is_some_and(|homepage| { homepage.contains("github.com/vincentkoc/slacrawl") })
+        );
+        assert!(!slacrawl.requires.install.iter().any(|install| {
+            install
+                .formula
+                .as_deref()
+                .is_some_and(|formula| formula.contains("vincentkoc/tap/slacrawl"))
+        }));
+        assert!(
+            !modules
+                .iter()
+                .any(|module| module.contains("github.com/vincentkoc/slacrawl"))
+        );
+    }
+
+    #[test]
     fn webhook_subscriptions_is_moltis_native() {
         let s = store();
         let body = s.read_skill("webhook-subscriptions").expect("should exist");

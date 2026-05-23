@@ -8,6 +8,7 @@ import type { RpcResponse } from "./types";
 declare global {
 	interface Window {
 		webkitAudioContext?: typeof AudioContext;
+		__moltisTestRpcTimeoutMs?: number;
 	}
 }
 
@@ -270,6 +271,10 @@ mdRenderer.html = ({ text }) => esc(text);
 const markedInstance = new Marked({ renderer: mdRenderer, breaks: true, gfm: true, async: false });
 const RPC_TIMEOUT_MS = 5_000;
 
+function rpcTimeoutMs(): number {
+	return window.__moltisTestRpcTimeoutMs ?? RPC_TIMEOUT_MS;
+}
+
 export function renderMarkdown(raw: string): string {
 	// Extract ASCII tables as placeholders before marked processes the text.
 	// Re-insert after marked is done so the HTML doesn't get escaped.
@@ -295,15 +300,21 @@ export function sendRpc<T = unknown>(method: string, params: unknown): Promise<R
 			return;
 		}
 		const id = nextId();
+		const timeoutMs = rpcTimeoutMs();
 		const timer = setTimeout(() => {
 			if (S.pending[id]) {
 				delete S.pending[id];
+				const message = `${localizedRpcErrorMessage({ code: "TIMEOUT", message: "RPC request timed out" })} (${method})`;
+				console.warn("RPC request timed out", { method, timeoutMs });
 				resolve({
 					ok: false,
-					error: { code: "TIMEOUT", message: "WebSocket disconnected" },
+					error: {
+						code: "TIMEOUT",
+						message,
+					},
 				} as unknown as RpcResponse<T>);
 			}
-		}, RPC_TIMEOUT_MS);
+		}, timeoutMs);
 		S.pending[id] = ((res: RpcResponse) => {
 			clearTimeout(timer);
 			resolve(res as RpcResponse<T>);
@@ -702,9 +713,13 @@ export function renderScreenshot(container: HTMLElement, imgSrc: string, scale?:
 /**
  * Return an icon string for a given MIME type / filename extension.
  */
-function documentIcon(mimeType?: string, filename?: string): string {
+export function documentIcon(mimeType?: string, filename?: string): string {
 	const ext = (filename || "").split(".").pop()?.toLowerCase() || "";
 	if (mimeType === "application/pdf" || ext === "pdf") return "\uD83D\uDCC4"; // 📄
+	if ((mimeType || "").startsWith("text/") || /^(txt|md|ics|json|xml|log)$/.test(ext)) return "\uD83D\uDCDD"; // 📝
+	if ((mimeType || "").startsWith("image/")) return "\uD83D\uDDBC\uFE0F"; // 🖼️
+	if ((mimeType || "").startsWith("audio/")) return "\uD83C\uDFB5"; // 🎵
+	if ((mimeType || "").startsWith("video/")) return "\uD83C\uDFA5"; // 🎥
 	if (mimeType === "application/zip" || mimeType === "application/gzip" || ext === "zip" || ext === "gz")
 		return "\uD83D\uDCE6"; // 📦
 	if (/spreadsheet|csv|xls/.test(mimeType || "") || /^(csv|xls|xlsx)$/.test(ext)) return "\uD83D\uDCCA"; // 📊
@@ -716,7 +731,7 @@ function documentIcon(mimeType?: string, filename?: string): string {
 /**
  * Format a byte count for display (e.g. "1.2 MB", "345 KB").
  */
-function formatDocSize(bytes: number): string {
+export function formatDocSize(bytes: number): string {
 	if (typeof bytes !== "number" || bytes < 0) return "";
 	if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)} MB`;
 	if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;

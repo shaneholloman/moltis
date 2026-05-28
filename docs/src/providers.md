@@ -79,7 +79,7 @@ stream_transport = "sse"              # "sse", "websocket", or "auto"
 
 [providers.gemini]
 enabled = true
-models = ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash"]
+models = ["gemini-2.5-flash", "gemini-2.5-pro"]
 # api_key = "..."                     # Or set GEMINI_API_KEY / GOOGLE_API_KEY env var
 # fetch_models = true                 # Discover models from the API
 # base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -116,7 +116,7 @@ Google Gemini uses an API key from [Google AI Studio](https://aistudio.google.co
 ```toml
 [providers.gemini]
 enabled = true
-models = ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash"]
+models = ["gemini-2.5-flash", "gemini-2.5-pro"]
 ```
 
 Gemini supports native tool calling, vision/multimodal inputs, streaming, and automatic model discovery.

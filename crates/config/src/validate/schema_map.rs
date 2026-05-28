@@ -313,6 +313,16 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 Struct(HashMap::from([("allow", Leaf), ("deny", Leaf)])),
             ),
             ("delegate_only", Leaf),
+            (
+                "tool_controls",
+                Struct(HashMap::from([
+                    ("active_tools", Leaf),
+                    (
+                        "tool_choice",
+                        Struct(HashMap::from([("type", Leaf), ("name", Leaf)])),
+                    ),
+                ])),
+            ),
             ("system_prompt_suffix", Leaf),
             ("max_iterations", Leaf),
             ("timeout_secs", Leaf),
@@ -330,7 +340,18 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 Struct(HashMap::from([("scope", Leaf), ("max_lines", Leaf)])),
             ),
             ("reasoning_effort", Leaf),
-            ("mcp", Struct(HashMap::from([("deny_servers", Leaf)]))),
+            (
+                "mcp",
+                Struct(HashMap::from([
+                    ("allow_servers", Leaf),
+                    ("deny_servers", Leaf),
+                ])),
+            ),
+            ("sandbox", Struct(HashMap::from([("mode", Leaf)]))),
+            (
+                "skills",
+                Struct(HashMap::from([("allow", Leaf), ("deny", Leaf)])),
+            ),
         ]))
     };
 

@@ -42,7 +42,7 @@ use crate::{
     prompt::{
         apply_request_runtime_context, apply_runtime_tool_filters, build_policy_context,
         build_prompt_runtime_context, clear_prompt_memory_snapshot, discover_skills_if_enabled,
-        load_prompt_persona_for_agent, load_prompt_persona_for_session,
+        filter_skills_for_agent, load_prompt_persona_for_agent, load_prompt_persona_for_session,
         prompt_build_limits_from_config, resolve_prompt_agent_id, resolve_prompt_mode_context,
     },
     run_with_tools::run_with_tools,
@@ -84,6 +84,8 @@ impl ChatService for LiveChatService {
             .unwrap_or(false);
 
         let explicit_model = params.get("model").and_then(|v| v.as_str());
+        let tool_controls =
+            moltis_config::schema::AgentToolControls::from_tool_context(Some(&params));
         let stream_only = !self.has_tools_sync();
 
         // Resolve session key from explicit override.
@@ -280,6 +282,7 @@ impl ChatService for LiveChatService {
                 &active_event_forwarders,
                 &terminal_runs,
                 None, // send_sync: no sender name
+                Some(tool_controls),
             )
             .await
         };
@@ -794,8 +797,9 @@ impl ChatService for LiveChatService {
         let config = moltis_config::discover_and_load();
         let tools: Vec<Value> = if supports_tools {
             let registry_guard = self.tool_registry.read().await;
+            let list_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
             let list_ctx = PolicyContext {
-                agent_id: "main".into(),
+                agent_id: list_agent_id,
                 ..Default::default()
             };
             let effective_registry =
@@ -1014,6 +1018,15 @@ impl ChatService for LiveChatService {
             .unwrap_or(false);
 
         let raw_prompt_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
+
+        // Apply per-agent skill policy.
+        let discovered_skills =
+            if let Some(preset) = persona.config.agents.get_preset(&raw_prompt_agent_id) {
+                filter_skills_for_agent(discovered_skills, &preset.skills)
+            } else {
+                discovered_skills
+            };
+
         // Build filtered tool registry.
         let policy_ctx =
             build_policy_context(&raw_prompt_agent_id, Some(&runtime_context), Some(&params));
@@ -1146,6 +1159,14 @@ impl ChatService for LiveChatService {
 
         // Build filtered tool registry.
         let full_ctx_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
+
+        // Apply per-agent skill policy.
+        let discovered_skills =
+            if let Some(preset) = persona.config.agents.get_preset(&full_ctx_agent_id) {
+                filter_skills_for_agent(discovered_skills, &preset.skills)
+            } else {
+                discovered_skills
+            };
         let policy_ctx =
             build_policy_context(&full_ctx_agent_id, Some(&runtime_context), Some(&params));
         let filtered_registry = {

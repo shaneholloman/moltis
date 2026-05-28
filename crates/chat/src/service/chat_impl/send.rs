@@ -22,8 +22,8 @@ use crate::{
     },
     prompt::{
         apply_request_runtime_context, build_prompt_runtime_context, discover_skills_if_enabled,
-        load_prompt_persona_for_session, resolve_channel_runtime_context, resolve_prompt_agent_id,
-        resolve_prompt_mode_context,
+        filter_skills_for_agent, load_prompt_persona_for_session, resolve_channel_runtime_context,
+        resolve_prompt_agent_id, resolve_prompt_mode_context,
     },
     run_with_tools::run_with_tools,
     streaming::run_streaming,
@@ -99,6 +99,8 @@ impl LiveChatService {
             .and_then(|v| v.as_str())
             .map(String::from);
         let explicit_model = params.get("model").and_then(|v| v.as_str());
+        let tool_controls =
+            moltis_config::schema::AgentToolControls::from_tool_context(Some(&params));
         // Use streaming-only mode if explicitly requested or if no tools are registered.
         let explicit_stream_only = params
             .get("stream_only")
@@ -837,17 +839,26 @@ impl LiveChatService {
         // Discover enabled skills/plugins for prompt injection (gated on
         // `[skills] enabled` — see #655).
         let discovered_skills = discover_skills_if_enabled(&self.config).await;
-        info!(
-            session = %session_key,
-            skills_len = discovered_skills.len(),
-            client_seq = ?client_seq,
-            "chat.send: skills discovered"
-        );
 
         // Check if MCP tools are disabled for this session and capture
         // per-session sandbox override details for prompt runtime context.
         let session_entry = self.session_metadata.get(&session_key).await;
         let session_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
+
+        // Apply per-agent skill policy (allow/deny by name or category).
+        let discovered_skills =
+            if let Some(preset) = self.config.agents.get_preset(&session_agent_id) {
+                filter_skills_for_agent(discovered_skills, &preset.skills)
+            } else {
+                discovered_skills
+            };
+        info!(
+            session = %session_key,
+            skills_len = discovered_skills.len(),
+            agent_id = %session_agent_id,
+            client_seq = ?client_seq,
+            "chat.send: skills discovered"
+        );
         info!(
             session = %session_key,
             agent_id = %session_agent_id,
@@ -860,9 +871,14 @@ impl LiveChatService {
             self.session_state_store.as_deref(),
         )
         .await;
+        let runtime_limits = persona.config.agent_runtime_limits(&session_agent_id);
         info!(
             session = %session_key,
             agent_id = %session_agent_id,
+            timeout_secs = runtime_limits.timeout_secs,
+            timeout_source = runtime_limits.timeout_source.as_str(),
+            max_iterations = runtime_limits.max_iterations,
+            max_iterations_source = runtime_limits.max_iterations_source.as_str(),
             client_seq = ?client_seq,
             "chat.send: persona loaded"
         );
@@ -933,6 +949,18 @@ impl LiveChatService {
 
         let provider_name = provider.name().to_string();
         let model_id = provider.id().to_string();
+        if self
+            .session_metadata
+            .get(&session_key)
+            .await
+            .and_then(|entry| entry.model)
+            .as_deref()
+            != Some(model_id.as_str())
+        {
+            self.session_metadata
+                .set_model(&session_key, Some(model_id.clone()))
+                .await;
+        }
         let model_store = Arc::clone(&self.model_store);
         let session_store = Arc::clone(&self.session_store);
         let session_metadata = Arc::clone(&self.session_metadata);
@@ -1087,7 +1115,11 @@ impl LiveChatService {
             }
         }
 
-        let agent_timeout_secs = self.config.tools.agent_timeout_secs;
+        let outer_agent_timeout_secs = if stream_only {
+            runtime_limits.timeout_secs
+        } else {
+            0
+        };
 
         let message_queue = Arc::clone(&self.message_queue);
         let state_for_drain = Arc::clone(&self.state);
@@ -1188,23 +1220,26 @@ impl LiveChatService {
                         &active_event_forwarders,
                         &terminal_runs,
                         sender_name,
+                        Some(tool_controls),
                     )
                     .await
                 }
             };
 
-            let assistant_text = if agent_timeout_secs > 0 {
-                match tokio::time::timeout(Duration::from_secs(agent_timeout_secs), agent_fut).await
+            let assistant_text = if outer_agent_timeout_secs > 0 {
+                match tokio::time::timeout(Duration::from_secs(outer_agent_timeout_secs), agent_fut)
+                    .await
                 {
                     Ok(result) => result,
                     Err(_) => {
                         warn!(
                             run_id = %run_id_clone,
                             session = %session_key_clone,
-                            timeout_secs = agent_timeout_secs,
+                            timeout_secs = outer_agent_timeout_secs,
                             "agent run timed out"
                         );
-                        let detail = format!("Agent run timed out after {agent_timeout_secs}s");
+                        let detail =
+                            format!("Agent run timed out after {outer_agent_timeout_secs}s");
                         let error_obj = serde_json::json!({
                             "type": "timeout",
                             "title": "Timed out",

@@ -16,7 +16,7 @@ use crate::{
 };
 
 use moltis_agents::model::{
-    ChatMessage, CompletionResponse, Usage, decode_tool_call_arguments_from_str,
+    AgentToolControls, ChatMessage, CompletionResponse, Usage, decode_tool_call_arguments_from_str,
 };
 
 use super::OpenAiProvider;
@@ -68,7 +68,8 @@ impl OpenAiProvider {
         // Keep them cheap instead of mirroring full reasoning budgets.
         self.apply_probe_output_cap_chat(&mut body);
 
-        debug!(model = %self.model, "openai probe request");
+        let url = self.chat_completions_url();
+        debug!(model = %self.model, url = %url, "openai probe request");
         trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "openai probe request body");
 
         let http_resp = self.send_chat_completions_request(&body).await?;
@@ -82,6 +83,7 @@ impl OpenAiProvider {
                     status = %status,
                     model = %self.model,
                     provider = %self.provider_name,
+                    url = %url,
                     body = %body_text,
                     "openai probe API error"
                 );
@@ -90,6 +92,7 @@ impl OpenAiProvider {
                     status = %status,
                     model = %self.model,
                     provider = %self.provider_name,
+                    url = %url,
                     "openai probe model unsupported for chat/completions endpoint"
                 );
             }
@@ -105,7 +108,7 @@ impl OpenAiProvider {
             anyhow::bail!(
                 "{}",
                 with_retry_after_marker(
-                    format!("OpenAI API error HTTP {status}: {body_text}"),
+                    format!("OpenAI API error at {url} HTTP {status}: {body_text}"),
                     retry_after_ms,
                 )
             );
@@ -310,6 +313,7 @@ impl OpenAiProvider {
         &self,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
+        options: &AgentToolControls,
     ) -> anyhow::Result<CompletionResponse> {
         let mut openai_messages = self.serialize_messages_for_request(messages);
         self.apply_openrouter_cache_control(&mut openai_messages);
@@ -322,6 +326,7 @@ impl OpenAiProvider {
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(self.prepare_chat_tools(tools));
         }
+        super::core::apply_openai_chat_tool_choice(&mut body, options)?;
 
         self.apply_reasoning_effort_chat(&mut body);
 
@@ -398,6 +403,7 @@ impl OpenAiProvider {
         &self,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
+        options: &AgentToolControls,
     ) -> anyhow::Result<CompletionResponse> {
         let (instructions, input) = split_responses_instructions_and_input(messages.to_vec());
         let mut body = serde_json::json!({
@@ -410,8 +416,8 @@ impl OpenAiProvider {
         }
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(to_responses_api_tools(tools));
-            body["tool_choice"] = serde_json::json!("auto");
         }
+        super::core::apply_openai_responses_tool_choice(&mut body, options)?;
 
         debug!(
             model = %self.model,

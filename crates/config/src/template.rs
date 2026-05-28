@@ -169,7 +169,7 @@ port = {port}                           # Port number (auto-generated for this i
 # [providers.gemini]
 # enabled = true
 # api_key = "..."                             # Or set GEMINI_API_KEY / GOOGLE_API_KEY env var
-# models = ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash"]
+# models = ["gemini-2.5-flash", "gemini-2.5-pro"]
 # fetch_models = true
 # base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 # alias = "gemini"
@@ -201,7 +201,7 @@ port = {port}                           # Port number (auto-generated for this i
 # [providers.fireworks]
 # enabled = true
 # api_key = "..."                             # Or set FIREWORKS_API_KEY env var
-# models = ["accounts/fireworks/routers/kimi-k2p5-turbo"]
+# models = ["accounts/fireworks/models/kimi-k2p5"]
 # fetch_models = true                          # Set false to skip remote discovery
 # base_url = "https://api.fireworks.ai/inference/v1"
 # alias = "fireworks"
@@ -300,12 +300,17 @@ port = {port}                           # Port number (auto-generated for this i
 # ══════════════════════════════════════════════════════════════════════════════
 # SUB-AGENT SPAWN PRESETS
 # ══════════════════════════════════════════════════════════════════════════════
-# Configure reusable presets for sub-agents spawned via the `spawn_agent` tool.
+# Configure reusable presets for agents and sub-agents spawned via the
+# `spawn_agent` tool.
 #
-# ⚠️  SCOPE: `[agents.presets.*]` applies ONLY to sub-agents spawned via the
-# `spawn_agent` tool. The `tools.allow` / `tools.deny` fields under a preset
-# do NOT filter tools for the main agent session. To allow/deny tools for the
-# main session, use the `[tools.policy]` section further down this file.
+# Runtime fields like `timeout_secs` and `max_iterations` apply to matching
+# direct agent sessions and spawned sub-agents. Direct sessions use global
+# `[tools]` values as fallbacks when a preset omits them. Spawned sub-agents
+# preserve no-timeout behavior unless the preset sets `timeout_secs`.
+#
+# ⚠️  SCOPE: `tools.allow` / `tools.deny` under a preset do NOT filter tools
+# for the main agent session. To allow/deny tools for the main session, use
+# the `[tools.policy]` section further down this file.
 #
 # [agents]
 # default_preset = "research"      # Sub-agent preset used when spawn_agent.preset is omitted
@@ -319,6 +324,33 @@ port = {port}                           # Port number (auto-generated for this i
 # identity.theme = "thorough, skeptical, and evidence-oriented"
 # system_prompt_suffix = "..."
 # max_iterations = 16
+# # Optional drift-resistant per-turn controls for spawned/preset agents:
+# # [agents.presets.research.tool_controls]
+# # active_tools = ["classify_destination"]
+# # [agents.presets.research.tool_controls.tool_choice]
+# # type = "tool"  # auto | any | none | tool
+# # name = "classify_destination"
+#
+# ── Per-agent capability boundaries ──────────────────────────────────────────
+# Each agent can be scoped to specific MCP servers, sandbox policies, and skills.
+# Assign agents to channels via `agent_id` in the channel account config.
+#
+# Example: restricted agent for kids (no MCP, no network, limited skills):
+# [agents.presets.kids]
+# model = "anthropic/claude-haiku-4-5-20251001"
+# [agents.presets.kids.mcp]
+# allow_servers = []                # No MCP tools at all
+# [agents.presets.kids.sandbox]
+# mode = "all"                      # Always sandbox this agent
+# [agents.presets.kids.skills]
+# deny = ["gaming", "social-media"] # Block specific skill categories
+#
+# Example: full-access agent for parents:
+# [agents.presets.admin]
+# [agents.presets.admin.mcp]
+# allow_servers = ["github", "home-assistant", "memory"]
+# [agents.presets.admin.sandbox]
+# mode = "all"                      # Always sandbox this agent
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SESSION MODES

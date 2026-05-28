@@ -23,14 +23,11 @@ const TEST_MODEL: &str = "accounts/fireworks/models/glm-5p1";
 /// Known Fireworks models we catalog. Keep in sync with `FIREWORKS_MODELS` in
 /// `crates/providers/src/model_catalogs.rs`.
 const KNOWN_MODELS: &[&str] = &[
-    "accounts/fireworks/routers/kimi-k2p5-turbo",
+    "accounts/fireworks/models/kimi-k2p5",
     "accounts/fireworks/models/kimi-k2p6",
     "accounts/fireworks/models/glm-5p1",
-    "accounts/fireworks/models/qwen3-235b-a22b-instruct-2507",
-    "accounts/fireworks/models/llama-v3p1-405b-instruct",
-    "accounts/fireworks/models/llama-v3p1-70b-instruct",
-    "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
-    "accounts/fireworks/models/kimi-k2-instruct-0905",
+    "accounts/fireworks/models/gpt-oss-120b",
+    "accounts/fireworks/models/deepseek-v4-pro",
 ];
 
 fn api_key() -> Secret<String> {
@@ -346,16 +343,16 @@ async fn catalog_models_are_live() {
     );
 }
 
-// ── Fire Pass router: Kimi K2.5 Turbo (issue #810) ──────────────────────────
+// ── Fireworks Kimi K2.5 regression coverage (issue #810) ────────────────────
 
-const KIMI_ROUTER_MODEL: &str = "accounts/fireworks/routers/kimi-k2p5-turbo";
+const KIMI_MODEL: &str = "accounts/fireworks/models/kimi-k2p5";
 
-/// Basic completion via Fireworks Fire Pass router to Kimi K2.5 must succeed.
+/// Basic completion via Fireworks Kimi K2.5 must succeed.
 /// Regression test for issue #810 where strict mode schemas caused 400 errors.
 #[tokio::test]
 #[ignore]
 async fn kimi_router_basic_completion() {
-    let p = make_provider(KIMI_ROUTER_MODEL);
+    let p = make_provider(KIMI_MODEL);
     let messages = vec![ChatMessage::user(
         "What is 2+2? Answer with just the number.",
     )];
@@ -363,19 +360,19 @@ async fn kimi_router_basic_completion() {
     let response = p
         .complete(&messages, &[])
         .await
-        .expect("Kimi K2.5 via Fire Pass should succeed (issue #810)");
+        .expect("Kimi K2.5 via Fireworks should succeed (issue #810)");
 
     let text = response.text.expect("should have text response");
     assert!(text.contains('4'), "expected '4' in response: {text:?}");
 }
 
-/// Tool calling via Fireworks Fire Pass Kimi K2.5 must not return 400.
+/// Tool calling via Fireworks Kimi K2.5 must not return 400.
 /// This was the primary regression in issue #810: strict tool schemas were
 /// sent to a backend that doesn't support them.
 #[tokio::test]
 #[ignore]
 async fn kimi_router_tool_call_no_400() {
-    let p = make_provider(KIMI_ROUTER_MODEL);
+    let p = make_provider(KIMI_MODEL);
     let tools = vec![weather_tool()];
     let messages = vec![ChatMessage::user(
         "What's the weather in Berlin? You must use the get_weather tool.",
@@ -384,7 +381,7 @@ async fn kimi_router_tool_call_no_400() {
     let response = p
         .complete(&messages, &tools)
         .await
-        .expect("Kimi K2.5 via Fire Pass tool call should not 400 (issue #810)");
+        .expect("Kimi K2.5 via Fireworks tool call should not 400 (issue #810)");
 
     assert!(
         !response.tool_calls.is_empty(),
@@ -394,12 +391,12 @@ async fn kimi_router_tool_call_no_400() {
     assert_eq!(response.tool_calls[0].name, "get_weather");
 }
 
-/// Multi-turn tool use with Kimi via Fire Pass: exercises reasoning_content
+/// Multi-turn tool use with Kimi via Fireworks: exercises reasoning_content
 /// serialization that Moonshot requires on assistant tool-call messages.
 #[tokio::test]
 #[ignore]
 async fn kimi_router_multi_turn_tool_use() {
-    let p = make_provider(KIMI_ROUTER_MODEL);
+    let p = make_provider(KIMI_MODEL);
     let tools = vec![weather_tool()];
 
     // Step 1: trigger tool call

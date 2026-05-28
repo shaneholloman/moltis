@@ -474,10 +474,10 @@ mod tests {
         assert!(!is_chat_capable_model("gemini-3.1-flash-image-preview"));
         // Gemini chat models pass
         assert!(is_chat_capable_model("gemini-2.0-flash"));
-        assert!(is_chat_capable_model("gemini-2.5-flash-preview-05-20"));
+        assert!(is_chat_capable_model("gemini-2.5-flash"));
         assert!(is_chat_capable_model("gemini-3-flash-preview"));
         assert!(is_chat_capable_model("gemini-3.1-pro-preview"));
-        assert!(is_chat_capable_model("gemini-3.1-flash-lite-preview"));
+        assert!(is_chat_capable_model("gemini-3.1-flash-lite"));
 
         // Z.AI non-chat models
         assert!(!is_chat_capable_model("glm-image"));
@@ -671,7 +671,7 @@ mod tests {
             "gemini-2.0-pro",
             "gemini-3-flash-preview",
             "gemini-3.1-pro-preview",
-            "gemini-3.1-flash-lite-preview",
+            "gemini-3.1-flash-lite",
             "gemini-ultra",
         ];
         for model in gemini_models {

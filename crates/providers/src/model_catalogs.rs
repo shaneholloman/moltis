@@ -1,5 +1,7 @@
 //! Static model catalogs and OpenAI-compatible provider definitions.
 
+use crate::openai::SystemMessageRewriteStrategy;
+
 /// Known Anthropic Claude models (model_id, display_name).
 /// Current models listed first, then legacy models.
 pub(crate) const ANTHROPIC_MODELS: &[(&str, &str)] = &[
@@ -69,31 +71,13 @@ pub(crate) fn is_fireworks_kimi_router(def: &OpenAiCompatDef, model_id: &str) ->
 
 /// Known Fireworks models.
 pub(crate) const FIREWORKS_MODELS: &[(&str, &str)] = &[
-    (
-        "accounts/fireworks/routers/kimi-k2p5-turbo",
-        "Kimi K2.5 Turbo",
-    ),
+    ("accounts/fireworks/models/kimi-k2p5", "Kimi K2.5"),
     ("accounts/fireworks/models/kimi-k2p6", "Kimi K2.6"),
     ("accounts/fireworks/models/glm-5p1", "GLM 5.1"),
+    ("accounts/fireworks/models/gpt-oss-120b", "GPT OSS 120B"),
     (
-        "accounts/fireworks/models/qwen3-235b-a22b-instruct-2507",
-        "Qwen3 235B A22B Instruct",
-    ),
-    (
-        "accounts/fireworks/models/llama-v3p1-405b-instruct",
-        "Llama 3.1 405B Instruct",
-    ),
-    (
-        "accounts/fireworks/models/llama-v3p1-70b-instruct",
-        "Llama 3.1 70B Instruct",
-    ),
-    (
-        "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
-        "Qwen3 Coder 480B A35B",
-    ),
-    (
-        "accounts/fireworks/models/kimi-k2-instruct-0905",
-        "Kimi K2 Instruct",
+        "accounts/fireworks/models/deepseek-v4-pro",
+        "DeepSeek V4 Pro",
     ),
 ];
 
@@ -146,15 +130,10 @@ pub(crate) const MOONSHOT_MODELS: &[(&str, &str)] =
 /// See: <https://ai.google.dev/gemini-api/docs/models>
 pub(crate) const GEMINI_MODELS: &[(&str, &str)] = &[
     ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
-    (
-        "gemini-3.1-flash-lite-preview",
-        "Gemini 3.1 Flash-Lite Preview",
-    ),
+    ("gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite"),
     ("gemini-3-flash-preview", "Gemini 3 Flash Preview"),
-    ("gemini-2.5-flash-preview-05-20", "Gemini 2.5 Flash Preview"),
-    ("gemini-2.5-pro-preview-05-06", "Gemini 2.5 Pro Preview"),
-    ("gemini-2.0-flash", "Gemini 2.0 Flash"),
-    ("gemini-2.0-flash-lite", "Gemini 2.0 Flash Lite"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+    ("gemini-2.5-pro", "Gemini 2.5 Pro"),
 ];
 
 /// OpenAI-compatible provider definition for table-driven registration.
@@ -178,6 +157,43 @@ pub(crate) struct OpenAiCompatDef {
     /// Also ensures model discovery is always attempted (never short-circuited
     /// by the empty-catalog heuristic).
     pub(crate) local_only: bool,
+    /// Whether this provider accepts the OpenAI-compatible `name` field on user messages.
+    pub(crate) supports_user_name: bool,
+    /// Default strict tool schema mode before config overrides.
+    pub(crate) default_strict_tools: bool,
+    /// Whether assistant tool-call messages need `reasoning_content` on replay.
+    pub(crate) default_reasoning_content_on_tool_messages: bool,
+    /// Raw model-id prefixes that need `reasoning_content` on tool-call replay.
+    pub(crate) reasoning_content_model_prefixes: &'static [&'static str],
+    /// Whether this provider rejects `null` entries inside JSON Schema enum arrays.
+    pub(crate) rejects_null_in_enums: bool,
+    /// Whether provider metadata should be nested as Gemini `extra_content`.
+    pub(crate) requires_gemini_tool_call_extra_content: bool,
+    /// Provider-specific system-message rewrite behavior.
+    pub(crate) system_message_rewrite: SystemMessageRewriteStrategy,
+    /// Whether Qwen-family models on this provider need one leading system message.
+    pub(crate) qwen_models_require_single_leading_system: bool,
+}
+
+impl OpenAiCompatDef {
+    const DEFAULT: Self = Self {
+        config_name: "",
+        env_key: "",
+        env_base_url_key: "",
+        default_base_url: "",
+        models: &[],
+        supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
+        supports_user_name: true,
+        default_strict_tools: true,
+        default_reasoning_content_on_tool_messages: false,
+        reasoning_content_model_prefixes: &[],
+        rejects_null_in_enums: false,
+        requires_gemini_tool_call_extra_content: false,
+        system_message_rewrite: SystemMessageRewriteStrategy::None,
+        qwen_models_require_single_leading_system: false,
+    };
 }
 
 pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
@@ -187,19 +203,16 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "MISTRAL_BASE_URL",
         default_base_url: "https://api.mistral.ai/v1",
         models: MISTRAL_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        supports_user_name: false,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "openrouter",
         env_key: "OPENROUTER_API_KEY",
         env_base_url_key: "OPENROUTER_BASE_URL",
         default_base_url: "https://openrouter.ai/api/v1",
-        models: &[],
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        default_strict_tools: false,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "cerebras",
@@ -207,9 +220,7 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "CEREBRAS_BASE_URL",
         default_base_url: "https://api.cerebras.ai/v1",
         models: CEREBRAS_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "minimax",
@@ -219,8 +230,9 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         models: MINIMAX_MODELS,
         // MiniMax API does not expose a /models endpoint (returns 404).
         supports_model_discovery: false,
-        requires_api_key: true,
-        local_only: false,
+        supports_user_name: false,
+        system_message_rewrite: SystemMessageRewriteStrategy::InlineIntoFirstUser,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "moonshot",
@@ -228,9 +240,8 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "MOONSHOT_BASE_URL",
         default_base_url: "https://api.moonshot.ai/v1",
         models: MOONSHOT_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        default_reasoning_content_on_tool_messages: true,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "zai",
@@ -238,9 +249,7 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "Z_BASE_URL",
         default_base_url: "https://api.z.ai/api/paas/v4",
         models: ZAI_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "zai-code",
@@ -248,19 +257,14 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "Z_CODE_BASE_URL",
         default_base_url: "https://api.z.ai/api/coding/paas/v4",
         models: ZAI_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "venice",
         env_key: "VENICE_API_KEY",
         env_base_url_key: "VENICE_BASE_URL",
         default_base_url: "https://api.venice.ai/api/v1",
-        models: &[],
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "deepinfra",
@@ -268,9 +272,7 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "DEEPINFRA_BASE_URL",
         default_base_url: "https://api.deepinfra.com/v1/openai",
         models: DEEPINFRA_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "deepseek",
@@ -278,9 +280,8 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "DEEPSEEK_BASE_URL",
         default_base_url: "https://api.deepseek.com",
         models: DEEPSEEK_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        reasoning_content_model_prefixes: &["deepseek-v4"],
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "fireworks",
@@ -288,29 +289,27 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "FIREWORKS_BASE_URL",
         default_base_url: "https://api.fireworks.ai/inference/v1",
         models: FIREWORKS_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        rejects_null_in_enums: true,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "ollama",
         env_key: "OLLAMA_API_KEY",
         env_base_url_key: "OLLAMA_BASE_URL",
         default_base_url: "http://localhost:11434/v1",
-        models: &[],
-        supports_model_discovery: true,
         requires_api_key: false,
         local_only: true,
+        qwen_models_require_single_leading_system: true,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "lmstudio",
         env_key: "LMSTUDIO_API_KEY",
         env_base_url_key: "LMSTUDIO_BASE_URL",
         default_base_url: "http://127.0.0.1:1234/v1",
-        models: &[],
-        supports_model_discovery: true,
         requires_api_key: false,
         local_only: true,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "alibaba-coding",
@@ -318,9 +317,8 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "ALIBABA_CODING_BASE_URL",
         default_base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
         models: ALIBABA_CODING_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        qwen_models_require_single_leading_system: true,
+        ..OpenAiCompatDef::DEFAULT
     },
     OpenAiCompatDef {
         config_name: "gemini",
@@ -328,9 +326,9 @@ pub(crate) const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         env_base_url_key: "GEMINI_BASE_URL",
         default_base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
         models: GEMINI_MODELS,
-        supports_model_discovery: true,
-        requires_api_key: true,
-        local_only: false,
+        default_strict_tools: false,
+        requires_gemini_tool_call_extra_content: true,
+        ..OpenAiCompatDef::DEFAULT
     },
 ];
 
@@ -433,6 +431,32 @@ mod tests {
     }
 
     #[test]
+    fn strict_name_providers_disable_user_names() {
+        let mistral = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "mistral")
+            .expect("mistral entry must exist");
+        let minimax = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "minimax")
+            .expect("minimax entry must exist");
+
+        assert!(!mistral.supports_user_name);
+        assert!(!minimax.supports_user_name);
+    }
+
+    #[test]
+    fn deepseek_preserves_reasoning_content_only_for_v4_tool_replay() {
+        let deepseek = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "deepseek")
+            .expect("deepseek entry must exist");
+
+        assert!(!deepseek.default_reasoning_content_on_tool_messages);
+        assert_eq!(deepseek.reasoning_content_model_prefixes, &["deepseek-v4"]);
+    }
+
+    #[test]
     fn alibaba_coding_provider_exists() {
         let alibaba = OPENAI_COMPAT_PROVIDERS
             .iter()
@@ -504,7 +528,7 @@ mod tests {
         ));
         assert!(!is_fireworks_kimi_router(
             fireworks,
-            "accounts/fireworks/models/kimi-k2-instruct-0905"
+            "accounts/fireworks/models/kimi-k2p5"
         ));
     }
 

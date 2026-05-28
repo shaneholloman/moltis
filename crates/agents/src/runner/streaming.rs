@@ -1,6 +1,6 @@
 //! Streaming variant of the agent loop.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use {
     anyhow::Result,
@@ -16,8 +16,8 @@ use moltis_common::hooks::{HookAction, HookPayload, HookRegistry};
 
 use crate::{
     model::{
-        ChatMessage, LlmProvider, StreamEvent, ToolCall, Usage, UserContent,
-        decode_tool_call_arguments_from_str, push_capped_provider_raw_event,
+        AgentToolControls, ChatMessage, LlmProvider, StreamEvent, ToolCall, ToolChoice, Usage,
+        UserContent, decode_tool_call_arguments_from_str, push_capped_provider_raw_event,
     },
     response_sanitizer::recover_tool_calls_from_content,
     tool_arg_validator::validate_tool_args,
@@ -29,10 +29,11 @@ use crate::{
 };
 
 use super::{
-    AUTO_CONTINUE_NUDGE, AgentRunError, AgentRunResult, MALFORMED_TOOL_RETRY_PROMPT, OnEvent,
-    RunnerEvent, UsageAccumulator, apply_before_llm_call_modify_payload,
-    apply_loop_detector_intervention, channel_binding_from_tool_context,
-    dispatch_after_llm_call_hook, dispatch_before_agent_start_hook, empty_tool_name_retry_prompt,
+    AUTO_CONTINUE_NUDGE, AgentLoopLimits, AgentRunError, AgentRunResult,
+    MALFORMED_TOOL_RETRY_PROMPT, OnEvent, RunnerEvent, UsageAccumulator,
+    apply_before_llm_call_modify_payload, apply_loop_detector_intervention,
+    channel_binding_from_tool_context, dispatch_after_llm_call_hook,
+    dispatch_before_agent_start_hook, empty_tool_name_retry_prompt,
     explicit_shell_command_from_user_content, find_empty_tool_name_call, finish_agent_run,
     has_named_tool_call, is_substantive_answer_text, log_tool_argument_diagnostic,
     resolve_tool_lookup,
@@ -65,6 +66,35 @@ pub async fn run_agent_loop_streaming(
     sender_name: Option<String>,
     steer_inbox: Option<super::SteerInbox>,
 ) -> Result<AgentRunResult, AgentRunError> {
+    run_agent_loop_streaming_with_limits(
+        provider,
+        tools,
+        system_prompt,
+        user_content,
+        on_event,
+        history,
+        tool_context,
+        hook_registry,
+        sender_name,
+        steer_inbox,
+        Default::default(),
+    )
+    .await
+}
+
+pub async fn run_agent_loop_streaming_with_limits(
+    provider: Arc<dyn LlmProvider>,
+    tools: &ToolRegistry,
+    system_prompt: &str,
+    user_content: &UserContent,
+    on_event: Option<&OnEvent>,
+    history: Option<Vec<ChatMessage>>,
+    tool_context: Option<serde_json::Value>,
+    hook_registry: Option<Arc<HookRegistry>>,
+    sender_name: Option<String>,
+    steer_inbox: Option<super::SteerInbox>,
+    limits: AgentLoopLimits,
+) -> Result<AgentRunResult, AgentRunError> {
     let native_tools = provider.supports_tools();
     let config = moltis_config::discover_and_load();
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
@@ -73,7 +103,10 @@ pub async fn run_agent_loop_streaming(
     let compaction_ratio = config.tools.tool_result_compaction_ratio as usize;
     let overflow_ratio = config.tools.preemptive_overflow_ratio as usize;
     let compaction_min_iterations = config.tools.compaction_min_iterations;
-    let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
+    let configured_max_iterations = limits
+        .max_iterations
+        .unwrap_or(config.tools.agent_max_iterations);
+    let base_max_iterations = resolve_agent_max_iterations(configured_max_iterations);
     // Lazy mode needs extra iterations for tool_search discovery round-trips.
     let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
         base_max_iterations * 3
@@ -140,6 +173,11 @@ pub async fn run_agent_loop_streaming(
         config.tools.agent_loop_detector_strip_tools_on_second_fire,
     );
     let mut strip_tools_next_iter = false;
+    let tool_controls = AgentToolControls::from_tool_context(tool_context.as_ref());
+    let active_tool_names = tool_controls
+        .active_tools
+        .as_ref()
+        .map(|names| names.iter().cloned().collect::<HashSet<_>>());
 
     loop {
         iterations += 1;
@@ -159,7 +197,30 @@ pub async fn run_agent_loop_streaming(
         // list for this single turn so the model is forced to respond in text
         // (issue #658).
         let schemas_for_api = if native_tools && !strip_tools_next_iter {
-            tools.list_schemas()
+            let schemas = if let Some(active) = active_tool_names.as_ref() {
+                tools.list_schemas_allowed_by(|name| active.contains(name))
+            } else {
+                tools.list_schemas()
+            };
+            match tool_controls.tool_choice.as_ref() {
+                Some(ToolChoice::None) => vec![],
+                Some(ToolChoice::Any) if schemas.is_empty() => {
+                    return Err(AgentRunError::Other(anyhow::anyhow!(
+                        "tool_choice any requires at least one active tool"
+                    )));
+                },
+                Some(ToolChoice::Tool { name }) => {
+                    if !schemas.iter().any(|schema| {
+                        schema.get("name").and_then(serde_json::Value::as_str) == Some(name)
+                    }) {
+                        return Err(AgentRunError::Other(anyhow::anyhow!(
+                            "forced tool_choice references unavailable tool: {name}"
+                        )));
+                    }
+                    schemas
+                },
+                _ => schemas,
+            }
         } else {
             vec![]
         };
@@ -228,7 +289,11 @@ pub async fn run_agent_loop_streaming(
         // Use streaming API.
         #[cfg(feature = "metrics")]
         let iter_start = std::time::Instant::now();
-        let mut stream = provider.stream_with_tools(messages.clone(), schemas_for_api.clone());
+        let mut stream = provider.stream_with_tools_and_options(
+            messages.clone(),
+            schemas_for_api.clone(),
+            tool_controls.clone(),
+        );
 
         // Accumulate answer text, reasoning text, and tool calls from the stream.
         let mut accumulated_text = String::new();
@@ -621,6 +686,10 @@ pub async fn run_agent_loop_streaming(
                     debug!(original = %sanitized, resolved = %resolved_name, "resolved legacy tool alias");
                 }
                 let mut args = tc.arguments.clone();
+                let tool_hidden = matches!(tool_controls.tool_choice, Some(ToolChoice::None))
+                    || active_tool_names
+                        .as_ref()
+                        .is_some_and(|active| !active.contains(resolved_name.as_ref()));
 
                 let hook_registry = hook_registry.clone();
                 let session_key = session_key_for_hooks.clone();
@@ -637,7 +706,18 @@ pub async fn run_agent_loop_streaming(
                 log_tool_argument_diagnostic(&tc_name, tc.argument_diagnostic.as_ref());
 
                 // Pre-dispatch validation against the tool's schema.
-                let validation_error: Option<String> = if let Some(ref t) = tool {
+                let validation_error: Option<String> = if tool_hidden {
+                    let reason = if matches!(tool_controls.tool_choice, Some(ToolChoice::None)) {
+                        format!(
+                            "tool `{tc_name}` cannot be called: tool use is disabled for this turn"
+                        )
+                    } else {
+                        format!(
+                            "tool `{tc_name}` is not active for this turn; choose one of the currently available tools"
+                        )
+                    };
+                    Some(reason)
+                } else if let Some(ref t) = tool {
                     let schema = t.parameters_schema();
                     match validate_tool_args(&schema, &args) {
                         Ok(()) => None,

@@ -33,6 +33,68 @@ pub struct AgentsConfig {
     pub presets: HashMap<String, AgentPreset>,
 }
 
+/// Per-request tool choice requested by the agent harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolChoice {
+    Auto,
+    Any,
+    None,
+    Tool { name: String },
+}
+
+/// Per-agent-run controls for tool visibility and provider tool selection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentToolControls {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+}
+
+impl AgentToolControls {
+    #[must_use]
+    pub fn from_tool_context(tool_context: Option<&serde_json::Value>) -> Self {
+        let Some(context) = tool_context else {
+            return Self::default();
+        };
+
+        let active_tools = context.get("active_tools").and_then(|value| {
+            value.as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+        });
+
+        let tool_choice =
+            context.get("tool_choice").and_then(|value| {
+                match serde_json::from_value::<ToolChoice>(value.clone()) {
+                    Ok(choice) => Some(choice),
+                    Err(error) => {
+                        tracing::warn!(%error, "ignoring invalid tool_choice control");
+                        None
+                    },
+                }
+            });
+
+        Self {
+            active_tools,
+            tool_choice,
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.active_tools.is_none() && self.tool_choice.is_none()
+    }
+}
+
 impl AgentsConfig {
     /// Return a preset by name.
     pub fn get_preset(&self, name: &str) -> Option<&AgentPreset> {
@@ -192,23 +254,141 @@ fn builtin_agent_preset(
     }
 }
 
+/// Identifies an MCP server by its configuration key.
+///
+/// Wraps the server name used as the key in `[mcp.servers.<name>]` and
+/// in tool names like `mcp__<name>__<tool>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct McpServerId(String);
+
+impl McpServerId {
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Tool-policy deny pattern that blocks all tools from this server.
+    #[must_use]
+    pub fn to_deny_pattern(&self) -> String {
+        format!("mcp__{}__*", self.0)
+    }
+}
+
+impl std::fmt::Display for McpServerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for McpServerId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for McpServerId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for McpServerId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl std::borrow::Borrow<str> for McpServerId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Per-agent MCP server access control.
 ///
-/// Excludes specific MCP servers' tools from this agent's sessions.
-/// Translates to tool policy deny patterns (`mcp__<server>__*`) at
-/// resolution time, so the agent never sees those tools in its context.
+/// Controls which MCP servers are visible to this agent. Translates to
+/// tool policy deny patterns (`mcp__<server>__*`) at resolution time,
+/// so the agent never sees excluded servers' tools in its context.
 ///
 /// ```toml
+/// # Allow-list: only these servers are visible
 /// [agents.presets.my-agent.mcp]
-/// deny_servers = ["home-assistant"]  # exclude Home Assistant tools
+/// allow_servers = ["github", "memory"]
+///
+/// # Deny-list: all servers except these
+/// [agents.presets.my-agent.mcp]
+/// deny_servers = ["home-assistant"]
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PresetMcpPolicy {
-    /// MCP servers to deny. Each entry generates a tool deny pattern
-    /// `mcp__<server>__*` that blocks all tools from that server.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deny_servers: Vec<String>,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PresetMcpPolicy {
+    /// No restrictions — all MCP servers are visible (default).
+    #[default]
+    All,
+    /// Only the listed servers are visible. All others are denied.
+    Allow(Vec<McpServerId>),
+    /// All servers except the listed ones are visible.
+    Deny(Vec<McpServerId>),
+}
+
+impl PresetMcpPolicy {
+    /// Returns `true` when no MCP restrictions are configured.
+    #[must_use]
+    pub fn is_all(&self) -> bool {
+        matches!(self, Self::All)
+    }
+}
+
+impl Serialize for PresetMcpPolicy {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Self::All => {
+                let map = serializer.serialize_map(Some(0))?;
+                map.end()
+            },
+            Self::Allow(servers) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("allow_servers", servers)?;
+                map.end()
+            },
+            Self::Deny(servers) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("deny_servers", servers)?;
+                map.end()
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PresetMcpPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Use Option to distinguish "field absent" from "field present but empty".
+        // `allow_servers = []` means "allow no MCP servers" (deny all),
+        // while omitting the field entirely means "no restriction" (All).
+        #[derive(Deserialize)]
+        struct Raw {
+            allow_servers: Option<Vec<McpServerId>>,
+            deny_servers: Option<Vec<McpServerId>>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        match (raw.allow_servers, raw.deny_servers) {
+            (None, None) => Ok(Self::All),
+            (Some(servers), None) => Ok(Self::Allow(servers)),
+            (None, Some(servers)) => Ok(Self::Deny(servers)),
+            (Some(_), Some(_)) => Err(serde::de::Error::custom(
+                "mcp: allow_servers and deny_servers are mutually exclusive",
+            )),
+        }
+    }
 }
 
 /// Tool policy for an agent preset (allow/deny specific tools).
@@ -291,6 +471,90 @@ impl Default for SessionAccessPolicyConfig {
     }
 }
 
+/// Per-agent sandbox mode override.
+///
+/// Only `mode` is enforced at runtime (applied as a per-session override
+/// on the `SandboxRouter`). Per-session network/workspace/resource
+/// overrides require deeper `SandboxRouter` changes and will be added
+/// when the router gains per-session config overlays.
+///
+/// ```toml
+/// [agents.presets.kids.sandbox]
+/// mode = "all"
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PresetSandboxMode {
+    /// Disable sandboxing for this agent.
+    Off,
+    /// Sandbox every session for this agent.
+    All,
+    /// Inherit the global non-main session sandbox behavior.
+    NonMain,
+}
+
+impl TryFrom<&str> for PresetSandboxMode {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "off" => Ok(Self::Off),
+            "all" => Ok(Self::All),
+            "non-main" => Ok(Self::NonMain),
+            other => Err(format!("unknown sandbox mode: {other}")),
+        }
+    }
+}
+
+/// Per-agent sandbox policy override.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PresetSandboxPolicy {
+    /// Sandbox mode override: "off", "all", "non-main".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<PresetSandboxMode>,
+}
+
+impl PresetSandboxPolicy {
+    /// Returns `true` when no overrides are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.mode.is_none()
+    }
+}
+
+/// Per-agent skill access control.
+///
+/// ```toml
+/// # Only allow specific skills
+/// [agents.presets.kids.skills]
+/// allow = ["web_search"]
+///
+/// # Deny specific skills
+/// [agents.presets.admin.skills]
+/// deny = ["gaming", "social-media"]
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PresetSkillPolicy {
+    /// When `Some`, only these skills (by name or category) are available.
+    /// `Some(vec![])` means "no skills allowed" (deny all).
+    /// `None` (absent from config) means "no restriction".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
+    /// Skills (by name or category) to deny from this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny: Option<Vec<String>>,
+}
+
+impl PresetSkillPolicy {
+    /// Returns `true` when no skill filtering is configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.allow.is_none() && self.deny.is_none()
+    }
+}
+
 /// Agent preset configuration.
 ///
 /// Presets define identity, model, tool policies, and system prompt for an
@@ -313,6 +577,9 @@ pub struct AgentPreset {
     /// Restrict sub-agent to delegation/session/task tools only.
     #[serde(default)]
     pub delegate_only: bool,
+    /// Per-turn tool visibility and provider tool-choice controls.
+    #[serde(default, skip_serializing_if = "AgentToolControls::is_empty")]
+    pub tool_controls: AgentToolControls,
     /// Optional extra instructions appended to sub-agent system prompt.
     pub system_prompt_suffix: Option<String>,
     /// Maximum iterations for agent loop.
@@ -331,9 +598,68 @@ pub struct AgentPreset {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Per-agent MCP server access control.
     ///
-    /// Controls which MCP servers are visible to this agent. When set, this
-    /// generates tool policy deny patterns for excluded servers, so the agent
-    /// never sees their tools in the prompt context.
-    #[serde(default)]
+    /// Controls which MCP servers are visible to this agent:
+    /// - `All` (default) — no restrictions, all MCP servers visible.
+    /// - `Allow(servers)` — only listed servers visible; others denied.
+    /// - `Deny(servers)` — all servers visible except listed ones.
+    #[serde(default, skip_serializing_if = "PresetMcpPolicy::is_all")]
     pub mcp: PresetMcpPolicy,
+    /// Per-agent sandbox policy overrides.
+    ///
+    /// Each set field overrides the global `[tools.exec.sandbox]` value.
+    /// Unset fields inherit the global config.
+    #[serde(default, skip_serializing_if = "PresetSandboxPolicy::is_empty")]
+    pub sandbox: PresetSandboxPolicy,
+    /// Per-agent skill access control.
+    ///
+    /// Controls which skills are visible to this agent. When `allow` is
+    /// non-empty, only listed skills are available. `deny` removes skills
+    /// by name or category.
+    #[serde(default, skip_serializing_if = "PresetSkillPolicy::is_empty")]
+    pub skills: PresetSkillPolicy,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_controls_parse_from_tool_context() {
+        let context = serde_json::json!({
+            "active_tools": ["classify_destination", "send_document"],
+            "tool_choice": { "type": "tool", "name": "classify_destination" }
+        });
+
+        let controls = AgentToolControls::from_tool_context(Some(&context));
+
+        assert_eq!(
+            controls.active_tools,
+            Some(vec![
+                "classify_destination".to_string(),
+                "send_document".to_string(),
+            ])
+        );
+        assert_eq!(
+            controls.tool_choice,
+            Some(ToolChoice::Tool {
+                name: "classify_destination".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn tool_controls_parse_any_variant() {
+        let context = serde_json::json!({
+            "tool_choice": { "type": "any" }
+        });
+        let controls = AgentToolControls::from_tool_context(Some(&context));
+        assert_eq!(controls.tool_choice, Some(ToolChoice::Any));
+        assert!(controls.active_tools.is_none());
+    }
+
+    #[test]
+    fn tool_controls_none_context_returns_default() {
+        let controls = AgentToolControls::from_tool_context(None);
+        assert!(controls.is_empty());
+    }
 }

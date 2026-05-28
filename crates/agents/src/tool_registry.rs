@@ -1,6 +1,7 @@
 use {
     anyhow::Result,
     async_trait::async_trait,
+    moltis_config::schema::McpServerId,
     std::{
         collections::HashMap,
         sync::{Arc, Mutex},
@@ -27,7 +28,7 @@ pub enum ToolSource {
     /// Built-in tool shipped with the binary.
     Builtin,
     /// Tool provided by an MCP server.
-    Mcp { server: String },
+    Mcp { server: McpServerId },
     /// Tool provided by a precompiled WASM component.
     Wasm { component_hash: [u8; 32] },
 }
@@ -89,7 +90,7 @@ impl ToolRegistry {
     }
 
     /// Register a tool from an MCP server. Warns (and overwrites) on name collision.
-    pub fn register_mcp(&mut self, tool: Box<dyn AgentTool>, server: String) {
+    pub fn register_mcp(&mut self, tool: Box<dyn AgentTool>, server: McpServerId) {
         let name = tool.name().to_string();
         let new_source = ToolSource::Mcp { server };
         if let Some(existing) = self.tools.get(&name) {
@@ -195,6 +196,21 @@ impl ToolRegistry {
         schemas
     }
 
+    pub fn list_schemas_allowed_by<F>(&self, mut predicate: F) -> Vec<serde_json::Value>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        self.list_schemas()
+            .into_iter()
+            .filter(|schema| {
+                schema
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(&mut predicate)
+            })
+            .collect()
+    }
+
     /// List registered tool names (static + activated).
     pub fn list_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
@@ -277,10 +293,18 @@ impl ToolRegistry {
     where
         F: FnMut(&str) -> bool,
     {
+        self.clone_allowed_entries(|name, _| predicate(name))
+    }
+
+    /// Clone the registry keeping only tools whose name and source metadata match `predicate`.
+    pub fn clone_allowed_entries<F>(&self, mut predicate: F) -> ToolRegistry
+    where
+        F: FnMut(&str, &ToolSource) -> bool,
+    {
         let tools = self
             .tools
             .iter()
-            .filter(|(name, _)| predicate(name))
+            .filter(|(name, entry)| predicate(name, &entry.source))
             .map(|(name, entry)| {
                 (name.clone(), ToolEntry {
                     tool: Arc::clone(&entry.tool),
@@ -311,7 +335,7 @@ fn entry_to_schema(e: &ToolEntry) -> serde_json::Value {
         },
         ToolSource::Mcp { server } => {
             schema["source"] = serde_json::json!("mcp");
-            schema["mcpServer"] = serde_json::json!(server);
+            schema["mcpServer"] = serde_json::json!(server.as_str());
         },
         ToolSource::Wasm { component_hash } => {
             schema["source"] = serde_json::json!("wasm");
@@ -406,13 +430,13 @@ mod tests {
             Box::new(DummyTool {
                 name: "mcp__github__search".to_string(),
             }),
-            "github".to_string(),
+            McpServerId::from("github"),
         );
         registry.register_mcp(
             Box::new(DummyTool {
                 name: "mcp__memory__store".to_string(),
             }),
-            "memory".to_string(),
+            McpServerId::from("memory"),
         );
 
         let filtered = registry.clone_without_mcp();
@@ -432,13 +456,13 @@ mod tests {
             Box::new(DummyTool {
                 name: "mcp__github__search".to_string(),
             }),
-            "github".to_string(),
+            McpServerId::from("github"),
         );
         registry.register_mcp(
             Box::new(DummyTool {
                 name: "mcp__memory__store".to_string(),
             }),
-            "memory".to_string(),
+            McpServerId::from("memory"),
         );
 
         let removed = registry.unregister_mcp();
@@ -457,7 +481,7 @@ mod tests {
             Box::new(DummyTool {
                 name: "mcp__github__search".to_string(),
             }),
-            "github".to_string(),
+            McpServerId::from("github"),
         );
         registry.register_wasm(
             Box::new(DummyTool {
@@ -582,7 +606,7 @@ mod tests {
             Box::new(DummyTool {
                 name: "Read".to_string(),
             }),
-            "filesystem".to_string(),
+            McpServerId::from("filesystem"),
         );
         // Source should now be Mcp even though the builtin was registered first.
         let src = registry.get_source("Read").unwrap();

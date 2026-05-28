@@ -42,7 +42,6 @@ pub(super) fn attach_ngrok_controller_owner(
 ) {
     app_state.ngrok_controller_owner = Some(Arc::clone(ngrok_controller));
 }
-
 #[cfg(feature = "mdns")]
 pub(super) fn instance_slug(config: &moltis_config::MoltisConfig) -> String {
     let mut raw_name = config.identity.name.clone();
@@ -776,6 +775,7 @@ pub(super) async fn finalize_prepared_gateway(
                         model: hb.model.clone(),
                         agent_id: hb.agent_id.clone(),
                         timeout_secs: None,
+                        tool_controls: Default::default(),
                         deliver: hb.deliver,
                         channel: hb.channel.clone(),
                         to: hb.to.clone(),
@@ -806,6 +806,7 @@ pub(super) async fn finalize_prepared_gateway(
                         model: hb.model.clone(),
                         agent_id: hb.agent_id.clone(),
                         timeout_secs: None,
+                        tool_controls: Default::default(),
                         deliver: hb.deliver,
                         channel: hb.channel.clone(),
                         to: hb.to.clone(),

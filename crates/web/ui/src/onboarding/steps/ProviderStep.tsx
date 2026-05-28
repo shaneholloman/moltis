@@ -9,6 +9,7 @@ import { completeProviderOAuth, startProviderOAuth } from "../../provider-oauth"
 import {
 	humanizeProbeError,
 	isModelServiceNotConfigured,
+	providerBaseUrlError,
 	saveProviderKey,
 	testModel,
 	validateProviderKey,
@@ -747,6 +748,12 @@ export function ProviderStep({ onNext, onBack }: { onNext: () => void; onBack?: 
 		const keyVal = apiKey.trim() || p.name;
 		const endpointVal = endpoint.trim() || null;
 		const modelVal = model.trim() || null;
+		const endpointError = providerBaseUrlError(endpointVal);
+		if (endpointError) {
+			setPhase("form");
+			setError(endpointError);
+			return;
+		}
 
 		validateProviderKey(p.name, keyVal, endpointVal, modelVal)
 			.then(async (result: { valid: boolean; error?: string; models?: ModelSelectorRow[] }) => {
@@ -1045,8 +1052,8 @@ export function ProviderStep({ onNext, onBack }: { onNext: () => void; onBack?: 
 	if (loading) return <div className="text-sm text-[var(--muted)]">{t("onboarding:provider.loadingLlms")}</div>;
 
 	const configuredProviders = providers.filter((p) => p.configured);
-	const recommendedProviders = providers.filter((p) => RECOMMENDED_PROVIDERS.has(p.name));
-	const otherProviders = providers.filter((p) => !RECOMMENDED_PROVIDERS.has(p.name));
+	const recommendedProviders = providers.filter((p) => p.configured || RECOMMENDED_PROVIDERS.has(p.name));
+	const otherProviders = providers.filter((p) => !(p.configured || RECOMMENDED_PROVIDERS.has(p.name)));
 	const otherIsActive = otherProviders.some(
 		(p) => configuring === p.name || oauthProvider === p.name || localProvider === p.name,
 	);

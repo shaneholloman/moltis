@@ -20,7 +20,7 @@ use crate::{
     ws_pool,
 };
 
-use moltis_agents::model::{ChatMessage, StreamEvent, Usage};
+use moltis_agents::model::{AgentToolControls, ChatMessage, StreamEvent, Usage};
 
 use super::OpenAiProvider;
 
@@ -56,6 +56,8 @@ impl OpenAiProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<serde_json::Value>,
         fallback_to_sse: bool,
+        options: AgentToolControls,
+        fallback_to_responses_sse: bool,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         // Synchronous pre-flight: URL, request, auth header, pool key.
         // Fail fast and fall back to SSE before entering the async generator,
@@ -81,7 +83,11 @@ impl OpenAiProvider {
             Err(err) => {
                 if fallback_to_sse {
                     debug!(error = %err, "websocket setup failed, falling back to sse");
-                    return self.stream_with_tools_sse(messages, tools);
+                    return if fallback_to_responses_sse {
+                        self.stream_responses_sse(messages, tools, options)
+                    } else {
+                        self.stream_with_tools_sse(messages, tools, options)
+                    };
                 }
                 return Box::pin(async_stream::stream! {
                     yield StreamEvent::Error(err.to_string());
@@ -99,7 +105,11 @@ impl OpenAiProvider {
                     Err(err) => {
                         if fallback_to_sse {
                             debug!(error = %err, "websocket connect failed, falling back to sse");
-                            let mut sse = self.stream_with_tools_sse(messages, tools);
+                            let mut sse = if fallback_to_responses_sse {
+                                self.stream_responses_sse(messages, tools, options)
+                            } else {
+                                self.stream_with_tools_sse(messages, tools, options)
+                            };
                             while let Some(event) = sse.next().await {
                                 yield event;
                             }
@@ -123,7 +133,10 @@ impl OpenAiProvider {
             }
             if !tools.is_empty() {
                 response_payload["tools"] = serde_json::Value::Array(to_responses_api_tools(&tools));
-                response_payload["tool_choice"] = serde_json::json!("auto");
+            }
+            if let Err(error) = super::core::apply_openai_responses_tool_choice(&mut response_payload, &options) {
+                yield StreamEvent::Error(error.to_string());
+                return;
             }
 
             self.apply_reasoning_effort_responses(&mut response_payload);

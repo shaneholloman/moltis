@@ -270,7 +270,11 @@ export function SessionHeader({
 		setGeneratingTitle(true);
 		sendRpc<{ label?: string }>("sessions.generate_title", { key: currentKey })
 			.then((res) => {
-				if (res?.ok) fetchSessions();
+				if (!res?.ok) {
+					showToast(res?.error?.message || "Failed to auto-generate title", "error");
+					return;
+				}
+				fetchSessions();
 			})
 			.finally(() => setGeneratingTitle(false));
 	}, [currentKey]);
@@ -583,10 +587,11 @@ export function SessionHeader({
 
 	const renameCta = showName && showRenameButton && canRename && !renaming && (
 		<div className="flex items-center gap-1">
-			<button className={actionButtonClass} onClick={startRename} title="Rename session">
+			<button type="button" className={actionButtonClass} onClick={startRename} title="Rename session">
 				Rename
 			</button>
 			<button
+				type="button"
 				className={actionButtonClass}
 				onClick={onGenerateTitle}
 				disabled={generatingTitle}

@@ -1,6 +1,6 @@
 //! Non-streaming agent loop: `run_agent_loop` and `run_agent_loop_with_context`.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use {
     anyhow::Result,
@@ -10,7 +10,7 @@ use {
 use moltis_common::hooks::{HookAction, HookPayload, HookRegistry};
 
 use crate::{
-    model::{ChatMessage, LlmProvider, ToolCall, UserContent},
+    model::{AgentToolControls, ChatMessage, LlmProvider, ToolCall, ToolChoice, UserContent},
     response_sanitizer::recover_tool_calls_from_content,
     tool_arg_validator::validate_tool_args,
     tool_loop_detector::ToolCallFingerprint,
@@ -21,10 +21,11 @@ use crate::{
 };
 
 use super::{
-    AUTO_CONTINUE_NUDGE, AgentRunError, AgentRunResult, MALFORMED_TOOL_RETRY_PROMPT, OnEvent,
-    RunnerEvent, UsageAccumulator, apply_before_llm_call_modify_payload,
-    apply_loop_detector_intervention, channel_binding_from_tool_context,
-    dispatch_after_llm_call_hook, dispatch_before_agent_start_hook, empty_tool_name_retry_prompt,
+    AUTO_CONTINUE_NUDGE, AgentLoopLimits, AgentRunError, AgentRunResult,
+    MALFORMED_TOOL_RETRY_PROMPT, OnEvent, RunnerEvent, UsageAccumulator,
+    apply_before_llm_call_modify_payload, apply_loop_detector_intervention,
+    channel_binding_from_tool_context, dispatch_after_llm_call_hook,
+    dispatch_before_agent_start_hook, empty_tool_name_retry_prompt,
     explicit_shell_command_from_user_content, find_empty_tool_name_call, finish_agent_run,
     has_named_tool_call, is_substantive_answer_text, log_tool_argument_diagnostic,
     record_answer_text, resolve_tool_lookup,
@@ -77,6 +78,33 @@ pub async fn run_agent_loop_with_context(
     hook_registry: Option<Arc<HookRegistry>>,
     sender_name: Option<String>,
 ) -> Result<AgentRunResult, AgentRunError> {
+    run_agent_loop_with_context_and_limits(
+        provider,
+        tools,
+        system_prompt,
+        user_content,
+        on_event,
+        history,
+        tool_context,
+        hook_registry,
+        sender_name,
+        Default::default(),
+    )
+    .await
+}
+
+pub async fn run_agent_loop_with_context_and_limits(
+    provider: Arc<dyn LlmProvider>,
+    tools: &ToolRegistry,
+    system_prompt: &str,
+    user_content: &UserContent,
+    on_event: Option<&OnEvent>,
+    history: Option<Vec<ChatMessage>>,
+    tool_context: Option<serde_json::Value>,
+    hook_registry: Option<Arc<HookRegistry>>,
+    sender_name: Option<String>,
+    limits: AgentLoopLimits,
+) -> Result<AgentRunResult, AgentRunError> {
     let native_tools = provider.supports_tools();
     let config = moltis_config::discover_and_load();
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
@@ -85,7 +113,10 @@ pub async fn run_agent_loop_with_context(
     let compaction_ratio = config.tools.tool_result_compaction_ratio as usize;
     let overflow_ratio = config.tools.preemptive_overflow_ratio as usize;
     let compaction_min_iterations = config.tools.compaction_min_iterations;
-    let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
+    let configured_max_iterations = limits
+        .max_iterations
+        .unwrap_or(config.tools.agent_max_iterations);
+    let base_max_iterations = resolve_agent_max_iterations(configured_max_iterations);
     // Lazy mode needs extra iterations for tool_search discovery round-trips.
     let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
         base_max_iterations * 3
@@ -148,6 +179,11 @@ pub async fn run_agent_loop_with_context(
         config.tools.agent_loop_detector_strip_tools_on_second_fire,
     );
     let mut strip_tools_next_iter = false;
+    let tool_controls = AgentToolControls::from_tool_context(tool_context.as_ref());
+    let active_tool_names = tool_controls
+        .active_tools
+        .as_ref()
+        .map(|names| names.iter().cloned().collect::<HashSet<_>>());
 
     loop {
         iterations += 1;
@@ -163,7 +199,30 @@ pub async fn run_agent_loop_with_context(
         // When the loop detector has escalated to stage 2, pass an empty tool
         // list for this single turn so the model is forced to respond in text.
         let schemas_for_api = if native_tools && !strip_tools_next_iter {
-            tools.list_schemas()
+            let schemas = if let Some(active) = active_tool_names.as_ref() {
+                tools.list_schemas_allowed_by(|name| active.contains(name))
+            } else {
+                tools.list_schemas()
+            };
+            match tool_controls.tool_choice.as_ref() {
+                Some(ToolChoice::None) => vec![],
+                Some(ToolChoice::Any) if schemas.is_empty() => {
+                    return Err(AgentRunError::Other(anyhow::anyhow!(
+                        "tool_choice any requires at least one active tool"
+                    )));
+                },
+                Some(ToolChoice::Tool { name }) => {
+                    if !schemas.iter().any(|schema| {
+                        schema.get("name").and_then(serde_json::Value::as_str) == Some(name)
+                    }) {
+                        return Err(AgentRunError::Other(anyhow::anyhow!(
+                            "forced tool_choice references unavailable tool: {name}"
+                        )));
+                    }
+                    schemas
+                },
+                _ => schemas,
+            }
         } else {
             vec![]
         };
@@ -229,7 +288,10 @@ pub async fn run_agent_loop_with_context(
             cb(RunnerEvent::Thinking);
         }
 
-        let mut response = match provider.complete(&messages, &schemas_for_api).await {
+        let mut response = match provider
+            .complete_with_options(&messages, &schemas_for_api, &tool_controls)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 let msg = e.to_string();
@@ -490,6 +552,10 @@ pub async fn run_agent_loop_with_context(
                     debug!(original = %sanitized, resolved = %resolved_name, "resolved legacy tool alias");
                 }
                 let mut args = tc.arguments.clone();
+                let tool_hidden = matches!(tool_controls.tool_choice, Some(ToolChoice::None))
+                    || active_tool_names
+                        .as_ref()
+                        .is_some_and(|active| !active.contains(resolved_name.as_ref()));
 
                 // Dispatch BeforeToolCall hook — may block or modify arguments.
                 let hook_registry = hook_registry.clone();
@@ -508,7 +574,18 @@ pub async fn run_agent_loop_with_context(
                 log_tool_argument_diagnostic(&tc_name, tc.argument_diagnostic.as_ref());
 
                 // Pre-dispatch validation against the tool's schema.
-                let validation_error: Option<String> = if let Some(ref t) = tool {
+                let validation_error: Option<String> = if tool_hidden {
+                    let reason = if matches!(tool_controls.tool_choice, Some(ToolChoice::None)) {
+                        format!(
+                            "tool `{tc_name}` cannot be called: tool use is disabled for this turn"
+                        )
+                    } else {
+                        format!(
+                            "tool `{tc_name}` is not active for this turn; choose one of the currently available tools"
+                        )
+                    };
+                    Some(reason)
+                } else if let Some(ref t) = tool {
                     let schema = t.parameters_schema();
                     match validate_tool_args(&schema, &args) {
                         Ok(()) => None,

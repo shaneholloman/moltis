@@ -102,7 +102,7 @@ stream_transport = "sse"        # "sse", "websocket", or "auto"
 
 [providers.gemini]
 enabled = true
-models = ["gemini-2.5-flash-preview-05-20", "gemini-2.0-flash"]
+models = ["gemini-2.5-flash", "gemini-2.5-pro"]
 
 [providers.local-llm]
 enabled = true

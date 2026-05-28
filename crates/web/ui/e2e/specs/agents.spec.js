@@ -46,11 +46,15 @@ async function deleteAgentByName(page, agentName) {
 	await expect(testCard).toHaveCount(0, { timeout: 10_000 });
 }
 
-async function mockExternalAgentsRpc(page) {
-	await page.addInitScript(() => {
+async function mockExternalAgentsRpc(page, listPayload) {
+	await page.addInitScript((externalAgentsListPayload) => {
 		if (window.__externalAgentE2EPatched) return;
 		window.__externalAgentE2EPatched = true;
 		window.__externalAgentE2ERequests = [];
+		window.__externalAgentE2EListPayload = externalAgentsListPayload || [
+			{ kind: "codex", name: "Codex", installed: true, version: null },
+			{ kind: "claude-code", name: "Claude Code", installed: false, version: null },
+		];
 		const originalSend = WebSocket.prototype.send;
 
 		function respond(socket, id, payload) {
@@ -67,10 +71,7 @@ async function mockExternalAgentsRpc(page) {
 				var parsed = JSON.parse(payload);
 				if (parsed?.method === "external_agents.list") {
 					window.__externalAgentE2ERequests.push({ method: parsed.method, params: parsed.params || {} });
-					respond(this, parsed.id, [
-						{ kind: "codex", name: "Codex", installed: true, version: null },
-						{ kind: "claude-code", name: "Claude Code", installed: false, version: null },
-					]);
+					respond(this, parsed.id, window.__externalAgentE2EListPayload);
 					return;
 				}
 				if (parsed?.method === "external_agents.bind") {
@@ -88,7 +89,7 @@ async function mockExternalAgentsRpc(page) {
 			}
 			return originalSend.call(this, payload);
 		};
-	});
+	}, listPayload);
 }
 
 async function expectActiveSessionExternalAgent(page, kind) {
@@ -119,7 +120,7 @@ test.describe("Agents settings page", () => {
 		await expect(page.getByRole("tab", { name: /Modes/ })).toBeVisible();
 
 		const chatPanel = page.getByLabel("Chat Agents panel");
-		await expect(chatPanel.getByText("Persistent identities you can select in chat.", { exact: false })).toBeVisible();
+		await expect(chatPanel.getByText("Persistent identities with their own memory", { exact: false })).toBeVisible();
 
 		await page.getByRole("tab", { name: /Modes/ }).click();
 		const modesPanel = page.getByLabel("Modes panel");
@@ -202,6 +203,41 @@ test.describe("Agents settings page", () => {
 		} finally {
 			await deleteAgentByName(page, "Coder");
 		}
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("sub-agent preset can be created edited and deleted", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/agents");
+		await waitForWsConnected(page);
+		await sendRpcFromPage(page, "agents.preset.delete", { id: "e2e-sub-agent" });
+
+		await page.getByRole("tab", { name: /Sub-Agents/ }).click();
+		await page.getByRole("button", { name: "New Sub-Agent", exact: true }).click();
+		await expect(page.getByText("Create Sub-Agent", { exact: true })).toBeVisible();
+		await page.getByPlaceholder("e.g. researcher, reviewer, qa-helper").fill("e2e-sub-agent");
+		await page.getByPlaceholder("Research Specialist").fill("E2E Sub Agent");
+		await page
+			.getByPlaceholder("Give this sub-agent a focused role and constraints...")
+			.fill("Answer with concise evidence.");
+		await page.getByPlaceholder("Read, Glob, Grep, web_search").fill("Read, Grep");
+		await page.getByRole("button", { name: "Create", exact: true }).click();
+
+		const presetCard = page.locator(".backend-card").filter({ hasText: "E2E Sub Agent" });
+		await expect(presetCard).toBeVisible({ timeout: 10_000 });
+		await expect(presetCard.getByText("Custom", { exact: true })).toBeVisible();
+
+		await presetCard.getByRole("button", { name: "Edit", exact: true }).click();
+		await expect(page.getByText("Edit E2E Sub Agent", { exact: true })).toBeVisible();
+		await page.getByPlaceholder("Research Specialist").fill("E2E Edited Sub Agent");
+		await page.getByRole("button", { name: "Save", exact: true }).click();
+		const editedCard = page.locator(".backend-card").filter({ hasText: "E2E Edited Sub Agent" });
+		await expect(editedCard).toBeVisible({ timeout: 10_000 });
+
+		await editedCard.getByRole("button", { name: "Delete", exact: true }).click();
+		await page.locator(".provider-modal").getByRole("button", { name: "Delete", exact: true }).click();
+		await expect(editedCard).toHaveCount(0, { timeout: 10_000 });
 
 		expect(pageErrors).toEqual([]);
 	});
@@ -367,6 +403,30 @@ test.describe("Agents settings page", () => {
 			)
 			.toBe(true);
 		await expectActiveSessionExternalAgent(page, null);
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("external-agent picker is hidden when external agents are disabled", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await mockExternalAgentsRpc(page, []);
+		await page.goto("/chats");
+		await expectPageContentMounted(page);
+		await waitForWsConnected(page);
+		await createSession(page);
+
+		await expect
+			.poll(
+				async () =>
+					page.evaluate(() =>
+						(window.__externalAgentE2ERequests || []).some((req) => req.method === "external_agents.list"),
+					),
+				{ timeout: 10_000 },
+			)
+			.toBe(true);
+		await expect(page.getByTestId("external-agent-picker")).toHaveCount(0);
+		await expect(page.getByText("Claude Code (unavailable)", { exact: true })).toHaveCount(0);
+		await expect(page.getByText("Codex", { exact: true })).toHaveCount(0);
 
 		expect(pageErrors).toEqual([]);
 	});

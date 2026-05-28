@@ -312,7 +312,7 @@ pub async fn prepare_gateway_core(
         let mcp_reg = moltis_mcp::McpRegistry::load(&mcp_registry_path).unwrap_or_default();
         let mut merged = mcp_reg;
         for (name, entry) in &config.mcp.servers {
-            if !merged.servers.contains_key(name) {
+            if !merged.servers.contains_key(name.as_str()) {
                 let transport = match entry.transport.as_str() {
                     "sse" => moltis_mcp::registry::TransportType::Sse,
                     "streamable_http" | "streamable-http" | "http" => {
@@ -332,7 +332,7 @@ pub async fn prepare_gateway_core(
                     });
                 merged
                     .servers
-                    .insert(name.clone(), moltis_mcp::McpServerConfig {
+                    .insert(name.to_string(), moltis_mcp::McpServerConfig {
                         command: entry.command.clone(),
                         args: entry.args.clone(),
                         env: entry.env.clone(),
@@ -766,6 +766,13 @@ pub async fn prepare_gateway_core(
             });
             if let Some(ref model) = req.model {
                 params["model"] = serde_json::Value::String(model.clone());
+            }
+            if let Some(active_tools) = req.tool_controls.active_tools.clone() {
+                params["active_tools"] = serde_json::json!(active_tools);
+            }
+            if let Some(tool_choice) = req.tool_controls.tool_choice.clone() {
+                params["tool_choice"] = serde_json::to_value(tool_choice)
+                    .map_err(|e| moltis_cron::Error::message(e.to_string()))?;
             }
             let result = chat
                 .send_sync(params)

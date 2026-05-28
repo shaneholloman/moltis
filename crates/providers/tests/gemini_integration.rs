@@ -15,17 +15,15 @@ use {
 };
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
-/// Use Flash Lite preview — cheapest available Gemini model.
-const TEST_MODEL: &str = "gemini-3.1-flash-lite-preview";
+/// Use Flash Lite — cheapest available Gemini model.
+const TEST_MODEL: &str = "gemini-3.1-flash-lite";
 
 const KNOWN_MODELS: &[&str] = &[
     "gemini-3.1-pro-preview",
-    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-flash-lite",
     "gemini-3-flash-preview",
-    "gemini-2.5-flash-preview-05-20",
-    "gemini-2.5-pro-preview-05-06",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
 ];
 
 fn api_key() -> Secret<String> {

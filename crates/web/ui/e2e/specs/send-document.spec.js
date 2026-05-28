@@ -9,17 +9,24 @@ async function openFreshChatSession(page) {
 }
 
 async function startDocumentToolCall(page, sessionKey, toolCallId, filename) {
-	await expectRpcOk(page, "system-event", {
-		event: "chat",
-		payload: {
-			sessionKey,
-			state: "tool_call_start",
-			toolCallId,
-			toolName: "send_document",
-			arguments: JSON.stringify({ path: `/tmp/${filename}` }),
-		},
-	});
-	await expect(page.locator(`#tool-${toolCallId} .exec-status`)).toBeVisible({ timeout: 10_000 });
+	await expect
+		.poll(
+			async () => {
+				await expectRpcOk(page, "system-event", {
+					event: "chat",
+					payload: {
+						sessionKey,
+						state: "tool_call_start",
+						toolCallId,
+						toolName: "send_document",
+						arguments: JSON.stringify({ path: `/tmp/${filename}` }),
+					},
+				});
+				return page.locator(`#tool-${toolCallId} .exec-status`).count();
+			},
+			{ timeout: 10_000 },
+		)
+		.toBe(1);
 }
 
 test.describe("send_document rendering", () => {

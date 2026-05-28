@@ -166,7 +166,9 @@ jobs:
           package-manager-cache: false
       - name: Install QMD CLI
         run: |
-          npm install -g @tobilu/qmd
+          npm install --prefix "$RUNNER_TEMP/qmd-cli" @tobilu/qmd
+          echo "$RUNNER_TEMP/qmd-cli/node_modules/.bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/qmd-cli/node_modules/.bin:$PATH"
           qmd --version
       - name: Initialize git repo in llama-cpp source to satisfy cmake
         run: |
@@ -269,7 +271,9 @@ jobs:
           package-manager-cache: false
       - name: Install QMD CLI
         run: |
-          npm install -g @tobilu/qmd
+          npm install --prefix "$RUNNER_TEMP/qmd-cli" @tobilu/qmd
+          echo "$RUNNER_TEMP/qmd-cli/node_modules/.bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/qmd-cli/node_modules/.bin:$PATH"
           qmd --version
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
@@ -520,7 +524,9 @@ jobs:
           package-manager-cache: false
       - name: Install QMD CLI
         run: |
-          npm install -g @tobilu/qmd
+          npm install --prefix "$RUNNER_TEMP/qmd-cli" @tobilu/qmd
+          echo "$RUNNER_TEMP/qmd-cli/node_modules/.bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/qmd-cli/node_modules/.bin:$PATH"
           qmd --version
       - name: Initialize git repo in llama-cpp source to satisfy cmake
         run: |

@@ -1,6 +1,6 @@
 use {
     super::*,
-    crate::schema::{KNOWN_PROVIDER_NAMES, MoltisConfig},
+    crate::schema::{KNOWN_PROVIDER_NAMES, MoltisConfig, ToolChoice},
     secrecy::ExposeSecret,
     std::path::Path,
 };
@@ -314,6 +314,38 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
             path: "tools.agent_max_iterations".into(),
             message: "tools.agent_max_iterations must be at least 1".into(),
         });
+    }
+    for (name, preset) in &config.agents.presets {
+        if preset.max_iterations == Some(0) {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                category: "invalid-value",
+                path: format!("agents.presets.{name}.max_iterations"),
+                message: "agents.presets.<name>.max_iterations must be at least 1".into(),
+            });
+        }
+        if let Some(ToolChoice::Tool { name: tool_name }) = &preset.tool_controls.tool_choice {
+            if tool_name.trim().is_empty() {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "invalid-value",
+                    path: format!("agents.presets.{name}.tool_controls.tool_choice.name"),
+                    message: "forced tool_choice requires a non-empty name".into(),
+                });
+            }
+            if let Some(active_tools) = &preset.tool_controls.active_tools
+                && !active_tools.iter().any(|active| active == tool_name)
+            {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    category: "invalid-value",
+                    path: format!("agents.presets.{name}.tool_controls"),
+                    message: format!(
+                        "forced tool_choice `{tool_name}` must be included in active_tools"
+                    ),
+                });
+            }
+        }
     }
 
     // A zero workspace file limit would silently drop all AGENTS.md / TOOLS.md content.
@@ -1104,6 +1136,43 @@ pub(super) fn check_file_references(
                     category: "file-ref",
                     path: (*path_name).into(),
                     message: format!("file not found: {file_path}"),
+                });
+            }
+        }
+    }
+
+    // Agent preset MCP allow/deny server validation — warn on unknown server names.
+    // Merge servers from both moltis.toml [mcp.servers] and the persistent
+    // mcp-servers.json registry file so we don't false-positive on servers
+    // added via the API.
+    let mut known_mcp_servers: std::collections::HashSet<String> = config
+        .mcp
+        .servers
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .collect();
+    let registry_path = crate::data_dir().join("mcp-servers.json");
+    if let Ok(data) = std::fs::read_to_string(&registry_path)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&data)
+        && let Some(servers) = json.get("servers").and_then(|v| v.as_object())
+    {
+        known_mcp_servers.extend(servers.keys().cloned());
+    }
+    for (preset_name, preset) in &config.agents.presets {
+        let servers = match &preset.mcp {
+            crate::schema::PresetMcpPolicy::Allow(s) | crate::schema::PresetMcpPolicy::Deny(s) => s,
+            crate::schema::PresetMcpPolicy::All => continue,
+        };
+        for server in servers {
+            if !known_mcp_servers.contains(server.as_str()) {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    category: "agents",
+                    path: format!("agents.presets.{preset_name}.mcp"),
+                    message: format!(
+                        "MCP server '{}' referenced in preset but not configured in [mcp.servers] or mcp-servers.json",
+                        server
+                    ),
                 });
             }
         }

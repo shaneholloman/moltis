@@ -107,6 +107,16 @@ test.describe("Session management", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("session header exposes auto-title action", async ({ page }) => {
+		const pageErrors = await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+		await createSession(page);
+
+		await expect(page.getByRole("button", { name: "Auto-title" })).toBeVisible();
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("opening full context button opens and closes the full context view", async ({ page }) => {
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
@@ -280,6 +290,80 @@ test.describe("Session management", () => {
 		});
 		await expect(page.locator("#sessionLoadIndicator")).toHaveCount(0);
 		await setSwitchRpcSendMode(page, "restore");
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("assistant response fork sends boundary after the clicked response", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		await createSession(page);
+		const sessionPath = new URL(page.url()).pathname;
+		const sessionKey = sessionPath.replace(/^\/chats\//, "").replace(/\//g, ":");
+		const assistantText = "fork should include this assistant response";
+
+		await expectRpcOk(page, "system-event", {
+			event: "chat",
+			payload: {
+				sessionKey,
+				state: "final",
+				text: assistantText,
+				messageIndex: 1,
+				model: "test-model",
+				provider: "test-provider",
+				replyMedium: "text",
+				runId: "run-fork-response",
+			},
+		});
+
+		const assistant = page.locator("#messages .msg.assistant").filter({ hasText: assistantText });
+		await expect(assistant).toBeVisible({ timeout: 5_000 });
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			const appUrl = new URL(appScript.src, window.location.origin);
+			const prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			const stateModule = await import(`${prefix}js/state.js`);
+			const ws = stateModule.ws;
+			if (!ws) throw new Error("websocket unavailable");
+
+			window.__capturedForkParams = null;
+			window.__origForkWsSend = ws.send.bind(ws);
+			ws.send = (payload) => {
+				let parsed;
+				try {
+					parsed = JSON.parse(payload);
+				} catch (_err) {
+					return window.__origForkWsSend(payload);
+				}
+				if (parsed?.method === "sessions.fork") {
+					window.__capturedForkParams = parsed.params;
+					const resolver = stateModule.pending?.[parsed.id];
+					if (typeof resolver !== "function") {
+						throw new Error("sessions.fork test expected a pending RPC resolver function");
+					}
+					delete stateModule.pending[parsed.id];
+					resolver({ ok: true, payload: { sessionKey: "session:fork-capture" } });
+					return;
+				}
+				return window.__origForkWsSend(payload);
+			};
+		});
+
+		await assistant.locator('.msg-action-btn[title="Fork into new session"]').click();
+		await expect
+			.poll(
+				() =>
+					page.evaluate(() => {
+						return window.__capturedForkParams || null;
+					}),
+				{ timeout: 5_000 },
+			)
+			.toEqual({ key: sessionKey, forkPoint: 2 });
+		await expect(page.getByText("Forked into new session", { exact: true })).toBeVisible();
 
 		expect(pageErrors).toEqual([]);
 	});

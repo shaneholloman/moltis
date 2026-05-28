@@ -182,8 +182,12 @@ pub(in crate::channel_events) async fn handle_title(
     state: &Arc<GatewayState>,
     session_key: &str,
 ) -> ChannelResult<String> {
-    crate::session::title::generate_title_for_session(state, session_key).await;
-    let label = if let Some(ref meta) = state.services.session_metadata {
+    let generated = crate::session::title::generate_title_for_session(state, session_key)
+        .await
+        .map_err(ChannelError::unavailable)?;
+    let label = if let Some(label) = generated {
+        label
+    } else if let Some(ref meta) = state.services.session_metadata {
         meta.get(session_key)
             .await
             .and_then(|e| e.label)

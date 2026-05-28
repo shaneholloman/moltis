@@ -10,8 +10,8 @@ use {async_trait::async_trait, futures::StreamExt, secrecy::ExposeSecret, tokio_
 use tracing::{debug, trace, warn};
 
 use moltis_agents::model::{
-    ChatMessage, CompletionResponse, ContentPart, LlmProvider, StreamEvent, ToolCall, Usage,
-    UserContent,
+    AgentToolControls, ChatMessage, CompletionResponse, ContentPart, LlmProvider, StreamEvent,
+    ToolCall, ToolChoice, Usage, UserContent,
 };
 
 pub struct AnthropicProvider {
@@ -438,6 +438,40 @@ fn to_anthropic_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn apply_anthropic_tool_choice(
+    body: &mut serde_json::Value,
+    options: &AgentToolControls,
+) -> anyhow::Result<()> {
+    match options.tool_choice.as_ref() {
+        None => {},
+        Some(ToolChoice::Auto) => {
+            if body.get("tools").is_some() {
+                body["tool_choice"] = serde_json::json!({ "type": "auto" });
+            }
+        },
+        Some(ToolChoice::Any) => {
+            if body.get("tools").is_some() {
+                body["tool_choice"] = serde_json::json!({ "type": "any" });
+            }
+        },
+        Some(ToolChoice::None) => {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("tools");
+            }
+        },
+        Some(ToolChoice::Tool { name }) => {
+            if name.trim().is_empty() {
+                anyhow::bail!("forced Anthropic tool_choice requires a tool name");
+            }
+            if body.get("tools").is_none() {
+                anyhow::bail!("forced Anthropic tool_choice requires at least one active tool");
+            }
+            body["tool_choice"] = serde_json::json!({ "type": "tool", "name": name });
+        },
+    }
+    Ok(())
+}
+
 /// Parse tool_use blocks from an Anthropic response.
 fn parse_tool_calls(content: &[serde_json::Value]) -> Vec<ToolCall> {
     content
@@ -692,6 +726,16 @@ impl LlmProvider for AnthropicProvider {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> anyhow::Result<CompletionResponse> {
+        self.complete_with_options(messages, tools, &AgentToolControls::default())
+            .await
+    }
+
+    async fn complete_with_options(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+        options: &AgentToolControls,
+    ) -> anyhow::Result<CompletionResponse> {
         let caching = self.caching_enabled();
         let (system_value, anthropic_messages) = to_anthropic_messages(messages, caching);
 
@@ -708,6 +752,17 @@ impl LlmProvider for AnthropicProvider {
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(to_anthropic_tools(tools));
         }
+
+        if self.reasoning_effort.is_some()
+            && matches!(
+                options.tool_choice,
+                Some(ToolChoice::Tool { .. } | ToolChoice::Any)
+            )
+        {
+            anyhow::bail!("Anthropic forced tool_choice is not compatible with extended thinking");
+        }
+
+        apply_anthropic_tool_choice(&mut body, options)?;
 
         self.apply_thinking(&mut body);
 
@@ -814,6 +869,15 @@ impl LlmProvider for AnthropicProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools_and_options(messages, tools, AgentToolControls::default())
+    }
+
+    fn stream_with_tools_and_options(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+        options: AgentToolControls,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         Box::pin(async_stream::stream! {
             let caching = self.caching_enabled();
             let (system_value, anthropic_messages) = to_anthropic_messages(&messages, caching);
@@ -831,6 +895,20 @@ impl LlmProvider for AnthropicProvider {
 
             if !tools.is_empty() {
                 body["tools"] = serde_json::Value::Array(to_anthropic_tools(&tools));
+            }
+
+            if self.reasoning_effort.is_some()
+                && matches!(options.tool_choice, Some(ToolChoice::Tool { .. } | ToolChoice::Any))
+            {
+                yield StreamEvent::Error(
+                    "Anthropic forced tool_choice is not compatible with extended thinking".to_string(),
+                );
+                return;
+            }
+
+            if let Err(error) = apply_anthropic_tool_choice(&mut body, &options) {
+                yield StreamEvent::Error(error.to_string());
+                return;
             }
 
             self.apply_thinking(&mut body);
@@ -900,8 +978,9 @@ impl LlmProvider for AnthropicProvider {
                     buf = buf[pos + 2..].to_string();
 
                     for line in block.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if let Ok(evt) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(data) = line.strip_prefix("data: ")
+                            && let Ok(evt) = serde_json::from_str::<serde_json::Value>(data)
+                        {
                                 let evt_type = evt["type"].as_str().unwrap_or("");
                                 match evt_type {
                                     "content_block_start" => {
@@ -921,19 +1000,19 @@ impl LlmProvider for AnthropicProvider {
                                         let delta_type = delta["type"].as_str().unwrap_or("");
 
                                         if delta_type == "text_delta" {
-                                            if let Some(text) = delta["text"].as_str() {
-                                                if !text.is_empty() {
-                                                    yield StreamEvent::Delta(text.to_string());
-                                                }
+                                            if let Some(text) = delta["text"].as_str()
+                                                && !text.is_empty()
+                                            {
+                                                yield StreamEvent::Delta(text.to_string());
                                             }
-                                        } else if delta_type == "input_json_delta" {
-                                            if let Some(partial_json) = delta["partial_json"].as_str() {
-                                                let index = evt["index"].as_u64().unwrap_or(0) as usize;
-                                                yield StreamEvent::ToolCallArgumentsDelta {
-                                                    index,
-                                                    delta: partial_json.to_string(),
-                                                };
-                                            }
+                                        } else if delta_type == "input_json_delta"
+                                            && let Some(partial_json) = delta["partial_json"].as_str()
+                                        {
+                                            let index = evt["index"].as_u64().unwrap_or(0) as usize;
+                                            yield StreamEvent::ToolCallArgumentsDelta {
+                                                index,
+                                                delta: partial_json.to_string(),
+                                            };
                                         }
                                     }
                                     "content_block_stop" => {
@@ -987,7 +1066,6 @@ impl LlmProvider for AnthropicProvider {
                                     }
                                     _ => {}
                                 }
-                            }
                         }
                     }
                 }

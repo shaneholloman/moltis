@@ -12,8 +12,8 @@ use {
 };
 
 use moltis_agents::model::{
-    ChatMessage, CompletionResponse, LlmProvider, ReasoningEffort, StreamEvent, ToolCall, Usage,
-    UserContent, decode_tool_call_arguments_from_str,
+    AgentToolControls, ChatMessage, CompletionResponse, LlmProvider, ReasoningEffort, StreamEvent,
+    ToolCall, Usage, UserContent, decode_tool_call_arguments_from_str,
 };
 
 use crate::openai_compat::to_responses_api_tools;
@@ -662,6 +662,16 @@ impl LlmProvider for OpenAiCodexProvider {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> anyhow::Result<CompletionResponse> {
+        self.complete_with_options(messages, tools, &AgentToolControls::default())
+            .await
+    }
+
+    async fn complete_with_options(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+        options: &AgentToolControls,
+    ) -> anyhow::Result<CompletionResponse> {
         self.ensure_supported_stream_transport()?;
 
         let tokens = self.get_valid_tokens().await?;
@@ -697,8 +707,8 @@ impl LlmProvider for OpenAiCodexProvider {
 
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(to_responses_api_tools(tools));
-            body["tool_choice"] = serde_json::json!("auto");
         }
+        crate::openai::provider::core::apply_openai_responses_tool_choice(&mut body, options)?;
 
         trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "openai-codex request body");
 
@@ -834,6 +844,15 @@ impl LlmProvider for OpenAiCodexProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+        self.stream_with_tools_and_options(messages, tools, AgentToolControls::default())
+    }
+
+    fn stream_with_tools_and_options(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+        options: AgentToolControls,
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         info!(
             tools_received = tools.len(),
             "stream_with_tools entry (before async_stream)"
@@ -888,7 +907,10 @@ impl LlmProvider for OpenAiCodexProvider {
 
             if !tools.is_empty() {
                 body["tools"] = serde_json::Value::Array(to_responses_api_tools(&tools));
-                body["tool_choice"] = serde_json::json!("auto");
+            }
+            if let Err(error) = crate::openai::provider::core::apply_openai_responses_tool_choice(&mut body, &options) {
+                yield StreamEvent::Error(error.to_string());
+                return;
             }
 
             info!(
@@ -963,10 +985,10 @@ impl LlmProvider for OpenAiCodexProvider {
 
                         match evt_type {
                             "response.output_text.delta" => {
-                                if let Some(delta) = evt["delta"].as_str() {
-                                    if !delta.is_empty() {
-                                        yield StreamEvent::Delta(delta.to_string());
-                                    }
+                                if let Some(delta) = evt["delta"].as_str()
+                                    && !delta.is_empty()
+                                {
+                                    yield StreamEvent::Delta(delta.to_string());
                                 }
                             }
                             "response.output_item.added"
@@ -980,19 +1002,19 @@ impl LlmProvider for OpenAiCodexProvider {
                                 yield StreamEvent::ToolCallStart { id, name, index, metadata: None };
                             }
                             "response.function_call_arguments.delta" => {
-                                if let Some(delta) = evt["delta"].as_str() {
-                                    if !delta.is_empty() {
-                                        // Find the index for this tool call (use the most recent one)
-                                        let index = if current_tool_index > 0 {
-                                            current_tool_index - 1
-                                        } else {
-                                            0
-                                        };
-                                        yield StreamEvent::ToolCallArgumentsDelta {
-                                            index,
-                                            delta: delta.to_string(),
-                                        };
-                                    }
+                                if let Some(delta) = evt["delta"].as_str()
+                                    && !delta.is_empty()
+                                {
+                                    // Find the index for this tool call (use the most recent one)
+                                    let index = if current_tool_index > 0 {
+                                        current_tool_index - 1
+                                    } else {
+                                        0
+                                    };
+                                    yield StreamEvent::ToolCallArgumentsDelta {
+                                        index,
+                                        delta: delta.to_string(),
+                                    };
                                 }
                             }
                             "response.function_call_arguments.done" => {

@@ -66,6 +66,32 @@ jobs:
             exit 1
           fi
 
+  provider-integration:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/provider-integration.yml
+    with:
+      fail_on_error: true
+    secrets:
+      MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+      FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      Z_API_KEY: ${{ secrets.Z_API_KEY }}
+      ALIBABA_CODING_API_KEY: ${{ secrets.ALIBABA_CODING_API_KEY }}
+      ALIBABA_CODING_BASE_URL: ${{ secrets.ALIBABA_CODING_BASE_URL }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+
   biome:
     needs: zizmor
     runs-on: ubuntu-latest
@@ -211,7 +237,9 @@ jobs:
       - name: Install QMD CLI
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}
         run: |
-          npm install -g @tobilu/qmd
+          npm install --prefix "$RUNNER_TEMP/qmd-cli" @tobilu/qmd
+          echo "$RUNNER_TEMP/qmd-cli/node_modules/.bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/qmd-cli/node_modules/.bin:$PATH"
           qmd --version
       - uses: taiki-e/install-action@f176c07a0a40cbfdd08ee9aa8bf1655701d11e69 # v2.67.25
         if: ${{ env.RELEASE_DRY_RUN != 'true' }}
@@ -309,8 +337,39 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  release-gates:
+    name: Release Gates
+    needs: [clippy, test, e2e, provider-integration]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Verify required release gates passed
+        env:
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          PROVIDER_RESULT: ${{ needs.provider-integration.result }}
+          IS_TAG_RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          failed=0
+          for gate in CLIPPY_RESULT TEST_RESULT E2E_RESULT; do
+            result="${!gate}"
+            if [ "$result" != "success" ]; then
+              echo "::error::$gate was $result"
+              failed=1
+            fi
+          done
+
+          if [ "$IS_TAG_RELEASE" = "true" ] && [ "$PROVIDER_RESULT" != "success" ]; then
+            echo "::error::PROVIDER_RESULT was $PROVIDER_RESULT"
+            failed=1
+          fi
+
+          exit "$failed"
+
   build-deb:
-    needs: [clippy, test, e2e]
+    needs: release-gates
     strategy:
       matrix:
         include:
@@ -413,7 +472,7 @@ jobs:
             target/${{ matrix.target }}/debian/*.crt
 
   build-rpm:
-    needs: [clippy, test, e2e]
+    needs: release-gates
     strategy:
       matrix:
         include:
@@ -511,7 +570,7 @@ jobs:
             target/${{ matrix.target }}/generate-rpm/*.crt
 
   build-arch:
-    needs: [clippy, test, e2e]
+    needs: release-gates
     strategy:
       matrix:
         include:
@@ -629,7 +688,7 @@ jobs:
             *.pkg.tar.zst.crt
 
   build-appimage:
-    needs: [clippy, test, e2e]
+    needs: release-gates
     strategy:
       matrix:
         include:
@@ -770,7 +829,7 @@ jobs:
             *.AppImage.crt
 
   build-snap:
-    needs: [clippy, test, e2e]
+    needs: release-gates
     runs-on: ubuntu-latest
     name: Build Snap
     permissions:
@@ -824,7 +883,7 @@ jobs:
             ${{ steps.build-snap.outputs.snap }}.crt
 
   build-homebrew-binaries:
-    needs: [clippy, test, e2e]
+    needs: release-gates
     strategy:
       matrix:
         include:
@@ -934,7 +993,7 @@ jobs:
             *.tar.gz.crt
 
   build-macos-app:
-    needs: [clippy, test, e2e]
+    needs: release-gates
     runs-on: macos-latest
     name: Build macOS app
     timeout-minutes: 180
@@ -1123,7 +1182,7 @@ jobs:
           fi
 
   build-windows-exe:
-    needs: [clippy, test, e2e]
+    needs: release-gates
     runs-on: windows-latest
     name: Build .exe (x86_64)
     permissions:
@@ -1223,7 +1282,7 @@ jobs:
 
   build-docker:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
-    needs: [clippy, test, e2e]
+    needs: release-gates
     strategy:
       matrix:
         include:

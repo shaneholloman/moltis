@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260529.01] - 2026-05-29
+### Removed
+- [discord] Log silent voice message drops (#1081)
+
+
+### Fixed
+- [cron] Preserve host execution target (#1079)
+- [web] Include clicked response in message forks (#1080)
+- [providers] Strip MiniMax user names (#1078)
+- [ci] Enforce provider release gates
+- [ci] Isolate qmd install
+- [skills] Track bundled skill disables individually (#1084)
+- [skills] Propagate bundled skill test errors
+
 ## [20260526.03] - 2026-05-26
 
 ## [20260526.02] - 2026-05-26

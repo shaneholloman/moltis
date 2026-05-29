@@ -170,8 +170,8 @@ test.describe("Command palette", () => {
 		await page.keyboard.press("Control+k");
 		await page.locator(".cmd-palette-input").fill("Skills");
 
-		// Wait for filtered results
-		await expect(page.locator(".cmd-palette-item", { hasText: "Skills" }).first()).toBeVisible();
+		// Wait for the filtered result to become the active command before pressing Enter.
+		await expect(page.locator(".cmd-palette-item-active .cmd-palette-item-label")).toHaveText("Skills");
 
 		await page.keyboard.press("Enter");
 

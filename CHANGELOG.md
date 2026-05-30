@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260529.02] - 2026-05-29
+### Fixed
+- [providers] Harden OpenAI-compatible request metadata
+
 ## [20260529.01] - 2026-05-29
 ### Removed
 - [discord] Log silent voice message drops (#1081)

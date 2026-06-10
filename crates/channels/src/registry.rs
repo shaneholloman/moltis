@@ -503,6 +503,20 @@ impl ChannelStreamOutbound for RegistryOutboundRouter {
         };
         stream_out.is_stream_enabled(account_id).await
     }
+
+    async fn streams_final_replies(&self, account_id: &str) -> bool {
+        let Some(stream_out) = self.registry.resolve_stream(account_id).await else {
+            return true;
+        };
+        stream_out.streams_final_replies(account_id).await
+    }
+
+    async fn receives_progress_deltas(&self, account_id: &str) -> bool {
+        let Some(stream_out) = self.registry.resolve_stream(account_id).await else {
+            return false;
+        };
+        stream_out.receives_progress_deltas(account_id).await
+    }
 }
 
 #[cfg(test)]
@@ -552,6 +566,8 @@ mod tests {
         id: String,
         accounts: std::sync::Mutex<HashMap<String, serde_json::Value>>,
         outbound: NullOutbound,
+        streams_final_replies: bool,
+        receives_progress_deltas: bool,
     }
 
     impl TestPlugin {
@@ -560,6 +576,18 @@ mod tests {
                 id: id.to_string(),
                 accounts: std::sync::Mutex::new(HashMap::new()),
                 outbound: NullOutbound,
+                streams_final_replies: true,
+                receives_progress_deltas: false,
+            }
+        }
+
+        fn new_progress_stream(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                accounts: std::sync::Mutex::new(HashMap::new()),
+                outbound: NullOutbound,
+                streams_final_replies: false,
+                receives_progress_deltas: true,
             }
         }
     }
@@ -628,7 +656,10 @@ mod tests {
         }
 
         fn shared_stream_outbound(&self) -> Arc<dyn ChannelStreamOutbound> {
-            Arc::new(NullStreamOutbound)
+            Arc::new(NullStreamOutbound {
+                streams_final_replies: self.streams_final_replies,
+                receives_progress_deltas: self.receives_progress_deltas,
+            })
         }
     }
 
@@ -663,7 +694,10 @@ mod tests {
         }
     }
 
-    struct NullStreamOutbound;
+    struct NullStreamOutbound {
+        streams_final_replies: bool,
+        receives_progress_deltas: bool,
+    }
 
     #[async_trait]
     impl ChannelStreamOutbound for NullStreamOutbound {
@@ -680,6 +714,14 @@ mod tests {
                 }
             }
             Ok(())
+        }
+
+        async fn streams_final_replies(&self, _: &str) -> bool {
+            self.streams_final_replies
+        }
+
+        async fn receives_progress_deltas(&self, _: &str) -> bool {
+            self.receives_progress_deltas
         }
     }
 
@@ -854,6 +896,27 @@ mod tests {
 
         let result = router.send_stream("bot1", "42", None, rx).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stream_router_forwards_final_reply_semantics() {
+        let mut registry = ChannelRegistry::new();
+        registry
+            .register(Arc::new(RwLock::new(TestPlugin::new_progress_stream(
+                "telegram",
+            ))))
+            .await;
+
+        registry
+            .start_account("telegram", "bot1", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let registry = Arc::new(registry);
+        let router = RegistryOutboundRouter::new(Arc::clone(&registry));
+
+        assert!(!router.streams_final_replies("bot1").await);
+        assert!(router.receives_progress_deltas("bot1").await);
     }
 
     #[tokio::test]

@@ -1017,8 +1017,10 @@ pub struct ChannelHealthSnapshot {
 /// Stream event for edit-in-place streaming.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    /// A chunk of text to append.
+    /// A chunk of final reply text to append.
     Delta(String),
+    /// A chunk of intermediate progress text to append.
+    ProgressDelta(String),
     /// Stream is complete.
     Done,
     /// An error occurred.
@@ -1046,6 +1048,23 @@ pub trait ChannelStreamOutbound: Send + Sync {
     /// Whether streaming is enabled for this account.
     async fn is_stream_enabled(&self, _account_id: &str) -> bool {
         true
+    }
+
+    /// Whether this stream already delivered the final reply text.
+    ///
+    /// Some channels use streaming for temporary progress updates only. Those
+    /// streams should not suppress the normal final reply delivery path.
+    async fn streams_final_replies(&self, _account_id: &str) -> bool {
+        true
+    }
+
+    /// Whether this stream consumes progress deltas separately from final text.
+    ///
+    /// Channels that only append streamed text should leave this disabled to
+    /// avoid receiving the same pre-tool draft once as final text and again as
+    /// reclassified progress.
+    async fn receives_progress_deltas(&self, _account_id: &str) -> bool {
+        false
     }
 }
 

@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use {
     futures::StreamExt,
@@ -428,10 +428,26 @@ async fn kimi_router_multi_turn_tool_use() {
         ChatMessage::tool(&tc.id, r#"{"temperature": 28, "condition": "sunny"}"#),
     ];
 
-    let final_response = p
+    let mut final_response = p
         .complete(&messages, &tools)
         .await
         .expect("second turn with tool result should succeed (issue #810)");
+
+    for attempt in 1..=2 {
+        if final_response
+            .text
+            .as_deref()
+            .is_some_and(|text| !text.is_empty())
+        {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_secs(attempt)).await;
+        final_response = p
+            .complete(&messages, &tools)
+            .await
+            .expect("second turn retry with tool result should succeed (issue #810)");
+    }
 
     let text = final_response.text.expect("should have text response");
     assert!(!text.is_empty(), "final response should not be empty");

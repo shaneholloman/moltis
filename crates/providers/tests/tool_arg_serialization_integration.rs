@@ -54,17 +54,39 @@ fn load_suite() -> ScenarioSuite {
 fn optional_var(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
+        .map(|value| value.trim().to_string())
         .filter(|value| !value.trim().is_empty())
+}
+
+fn is_absolute_http_url(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://")
+}
+
+fn configured_base_url_from_override(
+    config: &ProviderConfig,
+    env_base_url: Option<String>,
+) -> Option<String> {
+    if let Some(base_url) = env_base_url {
+        if is_absolute_http_url(&base_url) {
+            return Some(base_url);
+        }
+        eprintln!(
+            "ignoring invalid {} override for {}: expected absolute http(s) URL",
+            config.base_url_env.unwrap_or("base URL"),
+            config.provider_name
+        );
+    }
+
+    (!config.default_base_url.is_empty()).then(|| config.default_base_url.to_string())
+}
+
+fn configured_base_url(config: &ProviderConfig) -> Option<String> {
+    configured_base_url_from_override(config, config.base_url_env.and_then(optional_var))
 }
 
 fn configured_provider(config: &ProviderConfig) -> Option<OpenAiProvider> {
     let api_key = optional_var(config.api_key_env)?;
-
-    let base_url = match config.base_url_env {
-        Some(name) => optional_var(name)?,
-        None => config.default_base_url.to_string(),
-    };
-
+    let base_url = configured_base_url(config)?;
     let model = optional_var(config.model_env).unwrap_or_else(|| config.default_model.to_string());
 
     Some(OpenAiProvider::new_with_name(
@@ -107,11 +129,21 @@ fn is_transient_provider_error(error: &anyhow::Error) -> bool {
         || message.contains("connection termination")
 }
 
+fn is_account_unavailable_provider_error(provider_name: &str, error: &anyhow::Error) -> bool {
+    if provider_name != "alibaba-coding" {
+        return false;
+    }
+
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("http 401")
+        && (message.contains("invalid_api_key") || message.contains("invalid access token"))
+}
+
 async fn complete_scenario_with_retries(
     provider: &OpenAiProvider,
     provider_name: &str,
     scenario: &Scenario,
-) -> moltis_agents::model::CompletionResponse {
+) -> Option<moltis_agents::model::CompletionResponse> {
     for attempt in 0..3 {
         let result = provider
             .complete(
@@ -126,13 +158,19 @@ async fn complete_scenario_with_retries(
             .await;
 
         match result {
-            Ok(response) => return response,
+            Ok(response) => return Some(response),
             Err(error) if attempt < 2 && is_transient_provider_error(&error) => {
                 tokio::time::sleep(Duration::from_secs(2_u64.pow(attempt + 1))).await;
             },
+            Err(error) if is_account_unavailable_provider_error(provider_name, &error) => {
+                eprintln!(
+                    "skipping {provider_name} serialization scenarios: live account unavailable: {error:#}"
+                );
+                return None;
+            },
             Err(error) => {
                 panic!(
-                    "provider {provider_name} request failed for scenario {}: {error}",
+                    "provider {provider_name} request failed for scenario {}: {error:#}",
                     scenario.id
                 );
             },
@@ -154,7 +192,11 @@ async fn run_provider_scenarios(provider_name: &str, provider: OpenAiProvider) {
             continue;
         }
 
-        let response = complete_scenario_with_retries(&provider, provider_name, scenario).await;
+        let Some(response) =
+            complete_scenario_with_retries(&provider, provider_name, scenario).await
+        else {
+            return;
+        };
 
         assert_eq!(
             response.tool_calls.len(),
@@ -205,7 +247,7 @@ async fn alibaba_coding_serialization_scenarios_non_streaming() {
         provider_name: "alibaba-coding",
         api_key_env: "ALIBABA_CODING_API_KEY",
         base_url_env: Some("ALIBABA_CODING_BASE_URL"),
-        default_base_url: "",
+        default_base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
         model_env: "SERIALIZATION_TEST_ALIBABA_MODEL",
         default_model: "qwen3.5-plus",
     };
@@ -232,4 +274,39 @@ async fn openrouter_google_serialization_scenarios_non_streaming() {
     };
 
     run_provider_scenarios(config.provider_name, provider).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alibaba_config() -> ProviderConfig {
+        ProviderConfig {
+            provider_name: "alibaba-coding",
+            api_key_env: "ALIBABA_CODING_API_KEY",
+            base_url_env: Some("ALIBABA_CODING_BASE_URL"),
+            default_base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
+            model_env: "SERIALIZATION_TEST_ALIBABA_MODEL",
+            default_model: "qwen3.5-plus",
+        }
+    }
+
+    #[test]
+    fn configured_base_url_uses_absolute_override() {
+        assert_eq!(
+            configured_base_url_from_override(
+                &alibaba_config(),
+                Some("https://example.test/v1".to_string())
+            ),
+            Some("https://example.test/v1".to_string())
+        );
+    }
+
+    #[test]
+    fn configured_base_url_falls_back_from_relative_override() {
+        assert_eq!(
+            configured_base_url_from_override(&alibaba_config(), Some("/v1".to_string())),
+            Some("https://coding-intl.dashscope.aliyuncs.com/v1".to_string())
+        );
+    }
 }

@@ -29,6 +29,8 @@ on:
         required: false
       OPENAI_API_KEY:
         required: false
+      NEARAI_API_KEY:
+        required: false
       MISTRAL_API_KEY:
         required: false
       OPENROUTER_API_KEY:
@@ -67,6 +69,7 @@ jobs:
   provider-tests:
     name: ${{ matrix.provider }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     # Scheduled/manual provider checks report outages without blocking by default.
@@ -88,6 +91,8 @@ jobs:
             skip_reason: "configured account has insufficient credits"
           - provider: openai
             test: openai_integration
+          - provider: nearai
+            test: nearai_integration
           - provider: mistral
             test: mistral_integration
             skip_reason: "configured account is currently rate limited by the provider"
@@ -175,6 +180,18 @@ jobs:
             exit 0
           fi
           echo "OPENAI_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (nearai)
+        if: matrix.provider == 'nearai'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.NEARAI_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "NEARAI_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
 
       - name: Configure provider secret (mistral)
         if: matrix.provider == 'mistral'
@@ -278,6 +295,7 @@ jobs:
   provider-e2e-scenarios:
     name: Provider E2E Scenarios
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     continue-on-error: ${{ inputs.fail_on_error != true }}
@@ -312,6 +330,7 @@ jobs:
   cloud-sandbox-live-e2e:
     name: Cloud Sandbox Live E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
@@ -393,6 +412,7 @@ jobs:
   openai-live-e2e:
     name: OpenAI Live E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     continue-on-error: ${{ inputs.fail_on_error != true }}
@@ -478,6 +498,7 @@ jobs:
   ollama-qwen-live-e2e:
     name: Ollama Qwen Live E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     continue-on-error: ${{ inputs.fail_on_error != true }}
@@ -565,6 +586,7 @@ jobs:
   summary:
     name: Integration Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     needs:

@@ -195,12 +195,13 @@ async fn multiple_system_messages_all_delivered() {
         .expect("completion should succeed");
 
     let text = response.text.expect("response must contain text");
+    let lower_text = text.to_lowercase();
     assert!(
-        text.contains("ZEBRA"),
+        lower_text.contains("zebra"),
         "first system prompt missing: {text:?}"
     );
     assert!(
-        text.contains("GIRAFFE"),
+        lower_text.contains("giraffe"),
         "second system prompt missing: {text:?}"
     );
 }

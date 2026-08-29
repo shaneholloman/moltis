@@ -1302,6 +1302,13 @@
   .chat-session-name {
     font-size: 0.75rem;
     color: var(--muted);
+    /* Truncate rather than overflow the toolbar: an overflowing name renders
+       under the neighbouring combo boxes, which are positioned and therefore
+       swallow clicks meant for the name. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
   .chat-session-rename-input {
     font-size: 0.75rem;
@@ -1923,11 +1930,19 @@
     -webkit-mask-image: url("./icons/masks/mask-9efc91f08692af1a.svg");
     mask-image: url("./icons/masks/mask-9efc91f08692af1a.svg");
   }
+  .icon-files {
+    -webkit-mask-image: url("./icons/masks/files.svg");
+    mask-image: url("./icons/masks/files.svg");
+  }
 
   /* Navigation icons */
   .icon-channels {
     -webkit-mask-image: url("./icons/masks/mask-fa03630d2271dc99.svg");
     mask-image: url("./icons/masks/mask-fa03630d2271dc99.svg");
+  }
+  .icon-connectors {
+    -webkit-mask-image: url("./icons/masks/connectors.svg");
+    mask-image: url("./icons/masks/connectors.svg");
   }
   .icon-cube {
     -webkit-mask-image: url("./icons/masks/mask-6da716ec55cb2796.svg");
@@ -1952,6 +1967,10 @@
   .icon-chart-bar {
     -webkit-mask-image: url("./icons/masks/mask-b9bf0315417c03e4.svg");
     mask-image: url("./icons/masks/mask-b9bf0315417c03e4.svg");
+  }
+  .icon-instrumentation {
+    -webkit-mask-image: url("./icons/masks/instrumentation.svg");
+    mask-image: url("./icons/masks/instrumentation.svg");
   }
   .icon-server {
     -webkit-mask-image: url("./icons/masks/mask-7a1361dacb5b8427.svg");
@@ -2204,6 +2223,14 @@
   .icon-git-fork {
     -webkit-mask-image: url("./icons/masks/mask-git-fork.svg");
     mask-image: url("./icons/masks/mask-git-fork.svg");
+  }
+  .icon-thumbs-up {
+    -webkit-mask-image: url("./icons/masks/mask-thumbs-up.svg");
+    mask-image: url("./icons/masks/mask-thumbs-up.svg");
+  }
+  .icon-thumbs-down {
+    -webkit-mask-image: url("./icons/masks/mask-thumbs-down.svg");
+    mask-image: url("./icons/masks/mask-thumbs-down.svg");
   }
   .icon-list-plus {
     -webkit-mask-image: url("./icons/masks/mask-list-plus.svg");

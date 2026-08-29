@@ -213,6 +213,55 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
         });
     }
 
+    if config.tools.exec.sandbox.allow_host_podman {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Warning,
+            category: "security",
+            path: "tools.exec.sandbox.allow_host_podman".into(),
+            message: "allow_host_podman removes the sandbox boundary: commands can use the host Podman API to mount host paths and execute code with the Podman service user's access".into(),
+        });
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if config.tools.exec.sandbox.allow_host_podman {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "invalid-value",
+            path: "tools.exec.sandbox.allow_host_podman".into(),
+            message: "allow_host_podman is supported only on Linux hosts".into(),
+        });
+    }
+
+    if config.tools.exec.sandbox.allow_nested_podman {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Warning,
+            category: "security",
+            path: "tools.exec.sandbox.allow_nested_podman".into(),
+            message: "allow_nested_podman relaxes Podman sandbox hardening and starts the sandbox with privileged container settings".into(),
+        });
+    }
+
+    let podman_escape_hatch_enabled = config.tools.exec.sandbox.allow_host_podman
+        || config.tools.exec.sandbox.allow_nested_podman;
+    if podman_escape_hatch_enabled && config.tools.exec.sandbox.backend != "podman" {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "invalid-value",
+            path: "tools.exec.sandbox.backend".into(),
+            message: "Podman escape hatches require backend = \"podman\"".into(),
+        });
+    }
+
+    if config.tools.exec.sandbox.allow_host_podman && config.tools.exec.sandbox.allow_nested_podman
+    {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "invalid-value",
+            path: "tools.exec.sandbox".into(),
+            message: "allow_host_podman and allow_nested_podman are mutually exclusive".into(),
+        });
+    }
+
     // tools.fs: must_read_before_write requires track_reads
     if config.tools.fs.must_read_before_write && !config.tools.fs.track_reads {
         diagnostics.push(Diagnostic {
@@ -408,6 +457,8 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
             message: "mcp.request_timeout_secs must be at least 1".into(),
         });
     }
+
+    validate_instrumentation(&config.instrumentation, diagnostics);
 
     for (name, server) in &config.mcp.servers {
         if server.request_timeout_secs == Some(0) {
@@ -985,6 +1036,113 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
             ),
         });
     }
+}
+
+fn validate_instrumentation(
+    config: &crate::schema::InstrumentationConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !config.sample_rate.is_finite() {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "invalid-value",
+            path: "instrumentation.sample_rate".into(),
+            message: "instrumentation.sample_rate must be finite and between 0.0 and 1.0".into(),
+        });
+    } else if !(0.0..=1.0).contains(&config.sample_rate) {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "invalid-value",
+            path: "instrumentation.sample_rate".into(),
+            message: format!(
+                "instrumentation.sample_rate must be between 0.0 and 1.0 (got {})",
+                config.sample_rate
+            ),
+        });
+    }
+
+    let zero_values = [
+        (config.queue_capacity == 0, "instrumentation.queue_capacity"),
+        (
+            config.flush_interval_ms == 0,
+            "instrumentation.flush_interval_ms",
+        ),
+        (
+            config.max_batch_bytes == 0,
+            "instrumentation.max_batch_bytes",
+        ),
+        (
+            config.langfuse.timeout_secs == 0,
+            "instrumentation.langfuse.timeout_secs",
+        ),
+        (
+            config.otlp.timeout_secs == 0,
+            "instrumentation.otlp.timeout_secs",
+        ),
+        (
+            config.datadog.timeout_secs == 0,
+            "instrumentation.datadog.timeout_secs",
+        ),
+        (
+            config.feedback.link_retention_days == 0,
+            "instrumentation.feedback.link_retention_days",
+        ),
+    ];
+    diagnostics.extend(
+        zero_values
+            .into_iter()
+            .filter(|(is_zero, _)| *is_zero)
+            .map(|(_, path)| Diagnostic {
+                severity: Severity::Error,
+                category: "invalid-value",
+                path: path.into(),
+                message: format!("{path} must be at least 1"),
+            }),
+    );
+
+    let unusually_large = [
+        (
+            config.queue_capacity > 1_000_000,
+            "instrumentation.queue_capacity",
+            "a queue above 1,000,000 events can consume excessive memory",
+        ),
+        (
+            config.flush_interval_ms > 300_000,
+            "instrumentation.flush_interval_ms",
+            "an interval above 5 minutes delays delivery and increases shutdown loss risk",
+        ),
+        (
+            config.max_batch_bytes > 100_000_000,
+            "instrumentation.max_batch_bytes",
+            "a batch above 100 MB can exceed collector and proxy request limits",
+        ),
+        (
+            config.langfuse.timeout_secs > 300,
+            "instrumentation.langfuse.timeout_secs",
+            "a request timeout above 5 minutes can delay retries and shutdown",
+        ),
+        (
+            config.otlp.timeout_secs > 300,
+            "instrumentation.otlp.timeout_secs",
+            "a request timeout above 5 minutes can delay retries and shutdown",
+        ),
+        (
+            config.datadog.timeout_secs > 300,
+            "instrumentation.datadog.timeout_secs",
+            "a request timeout above 5 minutes can delay retries and shutdown",
+        ),
+    ];
+    diagnostics.extend(
+        unusually_large
+            .into_iter()
+            .filter(|(is_large, ..)| *is_large)
+            .map(|(_, path, message)| Diagnostic {
+                severity: Severity::Warning,
+                category: "invalid-value",
+                path: path.into(),
+                message: message.into(),
+            }),
+    );
 }
 
 /// Validate a `context_window` override value (optional field).

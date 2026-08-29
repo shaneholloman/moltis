@@ -26,7 +26,8 @@ use {
         file_system::{SandboxGrepOptions, SandboxListFilesResult, SandboxReadResult},
         platform::RestrictedHostSandbox,
         types::{
-            BuildImageResult, DEFAULT_SANDBOX_IMAGE, Sandbox, SandboxConfig, SandboxId, SandboxMode,
+            BuildImageResult, DEFAULT_SANDBOX_IMAGE, Sandbox, SandboxConfig, SandboxId,
+            SandboxMode, SandboxRuntimeInfo,
         },
     },
     crate::{
@@ -107,6 +108,19 @@ impl Sandbox for FailoverSandbox {
         }
     }
 
+    async fn runtime_name(&self, id: &SandboxId) -> Option<String> {
+        self.runtime_info(id).await.runtime_name
+    }
+
+    async fn runtime_info(&self, id: &SandboxId) -> SandboxRuntimeInfo {
+        let backend = if self.fallback_enabled().await {
+            Arc::clone(&self.fallback)
+        } else {
+            Arc::clone(&self.primary)
+        };
+        backend.runtime_info(id).await
+    }
+
     fn provides_fs_isolation(&self) -> bool {
         // On lock contention, conservatively report the fallback's (weaker)
         // isolation level rather than the primary's.
@@ -119,6 +133,19 @@ impl Sandbox for FailoverSandbox {
             self.fallback.provides_fs_isolation()
         } else {
             self.primary.provides_fs_isolation()
+        }
+    }
+
+    fn exposes_managed_files(&self) -> bool {
+        if self
+            .use_fallback
+            .try_read()
+            .map(|guard| *guard)
+            .unwrap_or(true)
+        {
+            self.fallback.exposes_managed_files()
+        } else {
+            self.primary.exposes_managed_files()
         }
     }
 

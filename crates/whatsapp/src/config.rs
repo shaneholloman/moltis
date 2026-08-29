@@ -1,6 +1,6 @@
 use {
     moltis_channels::{
-        config_view::ChannelConfigView,
+        config_view::{ChannelConfigView, UntrustedAudience, UntrustedTools},
         gating::{DmPolicy, GroupPolicy, MentionMode},
     },
     serde::{Deserialize, Serialize},
@@ -66,8 +66,29 @@ pub struct WhatsAppAccountConfig {
     /// User/peer allowlist for DMs (JID user parts or phone numbers).
     pub allowlist: Vec<String>,
 
+    /// Exact sender IDs allowed to run privileged channel commands.
+    /// Empty grants nobody privileged access.
+    #[serde(default)]
+    pub operators: Vec<String>,
+
     /// Group JID allowlist.
     pub group_allowlist: Vec<String>,
+
+    /// Name this client asserts for itself on WhatsApp.
+    ///
+    /// Overrides `[identity] name`. Unset on both falls back to `Moltis`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_name: Option<String>,
+
+    /// Tool audience ceiling for turns outside an operator direct chat
+    /// (default: `public`).
+    #[serde(default)]
+    pub untrusted_audience: UntrustedAudience,
+
+    /// Name policy for turns outside an operator direct chat
+    /// (default: `deny_all`).
+    #[serde(default)]
+    pub untrusted_tools: UntrustedTools,
 
     /// Enable OTP self-approval for non-allowlisted DM users (default: true).
     pub otp_self_approval: bool,
@@ -103,8 +124,20 @@ impl ChannelConfigView for WhatsAppAccountConfig {
         &self.allowlist
     }
 
+    fn operators(&self) -> &[String] {
+        &self.operators
+    }
+
     fn group_allowlist(&self) -> &[String] {
         &self.group_allowlist
+    }
+
+    fn untrusted_audience(&self) -> UntrustedAudience {
+        self.untrusted_audience
+    }
+
+    fn untrusted_tools(&self) -> UntrustedTools {
+        self.untrusted_tools
     }
 
     fn dm_policy(&self) -> DmPolicy {
@@ -178,7 +211,11 @@ impl Default for WhatsAppAccountConfig {
             group_policy: GroupPolicy::default(),
             mention_mode: MentionMode::Always,
             allowlist: Vec::new(),
+            operators: Vec::new(),
             group_allowlist: Vec::new(),
+            push_name: None,
+            untrusted_audience: UntrustedAudience::default(),
+            untrusted_tools: UntrustedTools::default(),
             otp_self_approval: true,
             otp_cooldown_secs: 300,
             channel_overrides: HashMap::new(),

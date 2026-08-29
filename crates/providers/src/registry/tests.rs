@@ -18,18 +18,52 @@ const FIREWORKS_KIMI_ROUTER: &str = "accounts/fireworks/routers/kimi-k2p5-turbo"
 
 #[test]
 fn openai_default_base_url_enables_responses_websocket() {
+    let capabilities = openai_builtin_capabilities("https://api.openai.com/v1");
     assert_eq!(
-        openai_builtin_capabilities(false).responses_websocket_policy,
+        capabilities.responses_websocket_policy,
         ResponsesWebSocketPolicy::OpenAiPlatform,
     );
+    assert!(capabilities.responses_required_for_reasoning_tools);
+}
+
+#[test]
+fn openai_explicit_default_base_url_enables_responses_routing() {
+    for base_url in [
+        " https://api.openai.com/v1/ ",
+        "https://API.OPENAI.COM/v1",
+        "https://api.openai.com:443/v1",
+    ] {
+        let capabilities = openai_builtin_capabilities(base_url);
+        assert_eq!(
+            capabilities.responses_websocket_policy,
+            ResponsesWebSocketPolicy::OpenAiPlatform,
+            "{base_url}",
+        );
+        assert!(
+            capabilities.responses_required_for_reasoning_tools,
+            "{base_url}"
+        );
+    }
 }
 
 #[test]
 fn openai_custom_base_url_disables_responses_websocket() {
-    assert_eq!(
-        openai_builtin_capabilities(true).responses_websocket_policy,
-        ResponsesWebSocketPolicy::Unsupported,
-    );
+    for base_url in [
+        "https://openai-compatible.example/v1",
+        "http://api.openai.com/v1",
+        "https://api.openai.com/v1?proxy=true",
+    ] {
+        let capabilities = openai_builtin_capabilities(base_url);
+        assert_eq!(
+            capabilities.responses_websocket_policy,
+            ResponsesWebSocketPolicy::Unsupported,
+            "{base_url}",
+        );
+        assert!(
+            !capabilities.responses_required_for_reasoning_tools,
+            "{base_url}"
+        );
+    }
 }
 
 fn capture_one_json_request() -> anyhow::Result<(String, mpsc::Receiver<anyhow::Result<Value>>)> {

@@ -27,7 +27,7 @@ import {
 	setSessionUnread,
 } from "../sessions";
 import * as S from "../state";
-import { sessionStore } from "../stores/session-store";
+import { markSessionRunStateChanged, sessionStore } from "../stores/session-store";
 import type { AbortedPartialState, ChatPayload, CompactPayload, ToolCallPayload } from "../types/ws-events";
 import {
 	clearChatEmptyState,
@@ -98,6 +98,7 @@ function handleChatThinkingDone(_p: ChatPayload, isActive: boolean, isChatPage: 
 }
 
 function handleChatVoicePending(_p: ChatPayload, isActive: boolean, isChatPage: boolean, eventSession: string): void {
+	markSessionRunStateChanged(eventSession);
 	// Update per-session signal
 	const session = sessionStore.getByKey(eventSession);
 	if (session) session.voicePending.value = true;
@@ -156,9 +157,7 @@ function handleChatChannelUser(p: ChatPayload, isActive: boolean, isChatPage: bo
 	// Always bump the badge so the total message count stays accurate,
 	// even when the user is not on the chat page (e.g. Telegram messages).
 	bumpSessionCount(eventSession, 1);
-	const cachedAudio = p.channel?.audio_filename
-		? `media/${eventSession.replaceAll(":", "_")}/${p.channel.audio_filename}`
-		: undefined;
+	const cachedAudio = p.channel?.audio_filename;
 	cacheSessionHistoryMessage(
 		eventSession,
 		{

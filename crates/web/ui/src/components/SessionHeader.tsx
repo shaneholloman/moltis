@@ -9,15 +9,18 @@ import { onEvent } from "../events";
 import * as gon from "../gon";
 import { parseAgentsListPayload, sendRpc } from "../helpers";
 import {
+	channelBindingLabel,
 	clearActiveSession,
 	clearSessionHistoryCache,
 	fetchSessions,
 	isArchivableSession,
+	isChannelUnbindableSession,
 	removeSessionFromClientState,
 	setSessionActiveRunId,
 	setSessionReplying,
 	switchSession,
 } from "../sessions";
+import { saveSessionAsMarkdown } from "../sessions/session-markdown";
 import { sessionStore } from "../stores/session-store";
 import { ComboSelect, confirmDialog, shareLinkDialog, shareVisibilityDialog, showToast } from "../ui";
 
@@ -38,14 +41,6 @@ interface AgentOption {
 	[key: string]: unknown;
 }
 
-interface ExternalAgentInfo {
-	kind: string;
-	name: string;
-	installed: boolean;
-	isAcp?: boolean;
-	version?: string | null;
-}
-
 interface SelectOption {
 	value: string;
 	label: string;
@@ -60,6 +55,7 @@ export interface SessionHeaderProps {
 	showSelectors?: boolean;
 	showName?: boolean;
 	showShare?: boolean;
+	showSaveMarkdown?: boolean;
 	showFork?: boolean;
 	showStop?: boolean;
 	showClear?: boolean;
@@ -97,12 +93,6 @@ function isSshTargetNode(node: NodeInfo | null): boolean {
 	return node?.platform === "ssh" || String(node?.nodeId || "").startsWith("ssh:");
 }
 
-function refreshModelComboAvailability(): void {
-	void import("../models").then(({ updateModelComboAvailability }) => {
-		updateModelComboAvailability();
-	});
-}
-
 function nodeOptionLabel(node: NodeInfo | null): string {
 	if (!node) return "Local";
 	if (node.displayName) return node.displayName;
@@ -132,6 +122,7 @@ export function SessionHeader({
 	showSelectors = true,
 	showName = true,
 	showShare = true,
+	showSaveMarkdown = false,
 	showFork = true,
 	showStop = true,
 	showClear = true,
@@ -155,6 +146,7 @@ export function SessionHeader({
 
 	const [renaming, setRenaming] = useState(false);
 	const [clearing, setClearing] = useState(false);
+	const [savingMarkdown, setSavingMarkdown] = useState(false);
 	const [stopping, setStopping] = useState(false);
 	const [switchingAgent, setSwitchingAgent] = useState(false);
 	const [agentOptions, setAgentOptions] = useState<AgentOption[]>(initialAgentOptions);
@@ -162,11 +154,6 @@ export function SessionHeader({
 	const [agentOptionsLoaded, setAgentOptionsLoaded] = useState(initialAgentOptions.length > 0);
 	const [nodeOptions, setNodeOptions] = useState<NodeInfo[]>([]);
 	const [switchingNode, setSwitchingNode] = useState(false);
-	const [externalAgentOptions, setExternalAgentOptions] = useState<ExternalAgentInfo[]>([]);
-	const [switchingExternalAgent, setSwitchingExternalAgent] = useState(false);
-	const [hasLlmModels, setHasLlmModels] = useState<boolean | null>(null);
-	const acpAutoBindAttemptedRef = useRef<Set<string>>(new Set());
-	const acpAutoBindInFlightRef = useRef<Set<string>>(new Set());
 	const inputRef = useRef<HTMLInputElement>(null);
 
 	const fullName = session ? session.label || session.key : currentKey;
@@ -179,14 +166,11 @@ export function SessionHeader({
 	const canRename = !(isMain || isCron);
 	const canStop = !isCron && replying;
 	const canArchive = !!session && isArchivableSession(session.toMeta());
+	const canUnbindChannel = !!session && isChannelUnbindableSession(session.toMeta());
+	const boundChannelLabel = session ? channelBindingLabel(session.toMeta()) : "";
 	const showArchivedSessions = sessionStore.showArchivedSessions.value;
 	const currentAgentId = session?.agent_id || defaultAgentId || "main";
 	const currentNodeId = session?.node_id || "";
-	const currentExternalAgentKind = session?.external_agent_kind || "";
-	const currentExternalAgent = currentExternalAgentKind
-		? externalAgentOptions.find((agent) => agent.kind === currentExternalAgentKind) || null
-		: null;
-	const currentExternalAgentName = currentExternalAgent?.name || currentExternalAgentKind;
 
 	useEffect(() => {
 		let cancelled = false;
@@ -200,29 +184,6 @@ export function SessionHeader({
 			setDefaultAgentId(parsed.defaultId);
 			setAgentOptions(parsed.agents as AgentOption[]);
 			setAgentOptionsLoaded(true);
-		});
-		return () => {
-			cancelled = true;
-		};
-	}, [currentKey]);
-
-	useEffect(() => {
-		let cancelled = false;
-		setHasLlmModels(null);
-		sendRpc<{ id?: string }[]>("models.list", {}).then((res) => {
-			if (cancelled) return;
-			setHasLlmModels(Boolean(res?.ok && (res.payload || []).length > 0));
-		});
-		return () => {
-			cancelled = true;
-		};
-	}, [currentKey]);
-
-	useEffect(() => {
-		let cancelled = false;
-		sendRpc<ExternalAgentInfo[]>("external_agents.list", {}).then((res) => {
-			if (cancelled || !res?.ok) return;
-			setExternalAgentOptions(Array.isArray(res.payload) ? res.payload : []);
 		});
 		return () => {
 			cancelled = true;
@@ -318,7 +279,6 @@ export function SessionHeader({
 		const currentSession = sessionStore.getByKey(currentKey);
 		const msgCount = currentSession ? currentSession.messageCount || 0 : 0;
 		const nextKey = nextSessionKey(currentKey);
-		const canOptimisticallyDelete = !currentSession?.worktree_branch;
 		const applyDeletedState = (): void => {
 			removeSessionFromClientState(currentKey, { nextKey });
 			switchSession(nextKey);
@@ -326,11 +286,6 @@ export function SessionHeader({
 		const runDelete = (force: boolean): void => {
 			const request: Record<string, unknown> = { key: currentKey };
 			if (force) request.force = true;
-			let optimisticApplied = false;
-			if (canOptimisticallyDelete && !force) {
-				applyDeletedState();
-				optimisticApplied = true;
-			}
 			sendRpc("sessions.delete", request).then((res) => {
 				const err = res?.error?.message || (typeof res?.error === "string" ? String(res.error) : "") || "";
 				if (res && !res.ok && typeof err === "string" && err.indexOf("uncommitted changes") !== -1) {
@@ -346,9 +301,7 @@ export function SessionHeader({
 					fetchSessions();
 					return;
 				}
-				if (!optimisticApplied) {
-					applyDeletedState();
-				}
+				applyDeletedState();
 				fetchSessions();
 			});
 		};
@@ -421,6 +374,18 @@ export function SessionHeader({
 		});
 	}, [onBeforeShare, shareSnapshot]);
 
+	const onSaveMarkdown = useCallback(() => {
+		if (savingMarkdown) return;
+		setSavingMarkdown(true);
+		saveSessionAsMarkdown(currentKey, fullName)
+			.then(() => showToast("Session saved as Markdown", "success"))
+			.catch((error: unknown) => {
+				const message = error instanceof Error ? error.message : "Failed to save session as Markdown";
+				showToast(message, "error");
+			})
+			.finally(() => setSavingMarkdown(false));
+	}, [currentKey, fullName, savingMarkdown]);
+
 	const onArchive = useCallback(() => {
 		if (!(session && canArchive)) return;
 		if (typeof onBeforeArchive === "function") {
@@ -443,6 +408,35 @@ export function SessionHeader({
 		});
 	}, [canArchive, currentKey, onBeforeArchive, session, showArchivedSessions]);
 
+	// A session attached to a chat runs every turn as an untrusted public turn:
+	// no tools, no memory, no project context, because the chat's history holds
+	// other people's messages. Releasing it is the only way back, so the control
+	// says what it restores rather than just "Unbind".
+	//
+	// No confirmation: this is reversible with `/attach` from the chat, and the
+	// shared confirm dialog labels its action button "Delete", which reads far
+	// more destructive than what happens.
+	const [unbinding, setUnbinding] = useState(false);
+	const onUnbindChannel = useCallback(() => {
+		if (!(session && canUnbindChannel)) return;
+		setUnbinding(true);
+		sendRpc("sessions.patch", { key: currentKey, channelBinding: null })
+			.then((res) => {
+				if (!res?.ok) {
+					showToast((res?.error as { message?: string })?.message || "Failed to release channel", "error");
+					return;
+				}
+				showToast(
+					boundChannelLabel
+						? `Released from ${boundChannelLabel}. Tools and private context are available here again.`
+						: "Released from its channel. Tools and private context are available here again.",
+					"success",
+				);
+				fetchSessions();
+			})
+			.finally(() => setUnbinding(false));
+	}, [boundChannelLabel, canUnbindChannel, currentKey, session]);
+
 	const onAgentChange = useCallback(
 		(nextAgentId: string) => {
 			if (!nextAgentId || nextAgentId === currentAgentId || switchingAgent) {
@@ -458,9 +452,10 @@ export function SessionHeader({
 						showToast((res?.error as { message?: string })?.message || "Failed to switch agent", "error");
 						return;
 					}
-					if (session) {
-						session.agent_id = nextAgentId;
-						session.dataVersion.value++;
+					const currentSession = sessionStore.getByKey(currentKey);
+					if (currentSession) {
+						currentSession.agent_id = nextAgentId;
+						currentSession.dataVersion.value++;
 					}
 					fetchSessions();
 				})
@@ -468,7 +463,7 @@ export function SessionHeader({
 					setSwitchingAgent(false);
 				});
 		},
-		[currentAgentId, currentKey, session, switchingAgent],
+		[currentAgentId, currentKey, switchingAgent],
 	);
 
 	const onNodeChange = useCallback(
@@ -497,71 +492,6 @@ export function SessionHeader({
 		[currentKey, session, switchingNode],
 	);
 
-	const onExternalAgentChange = useCallback(
-		(nextKind: string) => {
-			if (switchingExternalAgent || nextKind === currentExternalAgentKind) return;
-			setSwitchingExternalAgent(true);
-			const request = nextKind
-				? sendRpc("external_agents.bind", { sessionKey: currentKey, kind: nextKind })
-				: sendRpc("external_agents.unbind", { sessionKey: currentKey });
-			request
-				.then((res) => {
-					if (!res?.ok) {
-						showToast((res?.error as { message?: string })?.message || "Failed to update external agent", "error");
-						return;
-					}
-					if (session) {
-						session.external_agent_kind = nextKind || null;
-						session.dataVersion.value++;
-					}
-					refreshModelComboAvailability();
-					fetchSessions();
-				})
-				.finally(() => {
-					setSwitchingExternalAgent(false);
-				});
-		},
-		[currentExternalAgentKind, currentKey, session, switchingExternalAgent],
-	);
-
-	useEffect(() => {
-		if (
-			isCron ||
-			hasLlmModels !== false ||
-			currentExternalAgentKind ||
-			acpAutoBindAttemptedRef.current.has(currentKey) ||
-			acpAutoBindInFlightRef.current.has(currentKey)
-		) {
-			return;
-		}
-		const firstAcpAgent = externalAgentOptions.find((agent) => agent.installed && agent.isAcp);
-		if (!firstAcpAgent) return;
-
-		let cancelled = false;
-		acpAutoBindInFlightRef.current.add(currentKey);
-		sendRpc("external_agents.bind", { sessionKey: currentKey, kind: firstAcpAgent.kind })
-			.then((bindRes) => {
-				if (cancelled) return;
-				if (!bindRes?.ok) {
-					showToast((bindRes?.error as { message?: string })?.message || "Failed to select ACP agent", "error");
-					return;
-				}
-				acpAutoBindAttemptedRef.current.add(currentKey);
-				if (session) {
-					session.external_agent_kind = firstAcpAgent.kind;
-					session.dataVersion.value++;
-				}
-				refreshModelComboAvailability();
-				fetchSessions();
-			})
-			.finally(() => {
-				acpAutoBindInFlightRef.current.delete(currentKey);
-			});
-		return () => {
-			cancelled = true;
-		};
-	}, [currentExternalAgentKind, currentKey, externalAgentOptions, hasLlmModels, isCron, session]);
-
 	const agentSelectValue = currentAgentId;
 	const hasCurrentAgentOption = agentOptions.some((agent) => agent.id === agentSelectValue);
 	let agentSelectOptions: SelectOption[] = agentOptions.map((agent) => {
@@ -585,28 +515,6 @@ export function SessionHeader({
 	const shouldShowAgentPicker = !isCron && agentOptionsLoaded && (agentOptions.length > 1 || !hasCurrentAgentOption);
 
 	const shouldShowNodePicker = !isCron && (nodeOptions.length > 0 || Boolean(currentNodeId));
-	const selectableExternalAgents = externalAgentOptions.filter(
-		(agent) =>
-			(agent.isAcp || agent.kind === currentExternalAgentKind) &&
-			(agent.installed || agent.kind === currentExternalAgentKind),
-	);
-	const externalAgentSelectOptions: SelectOption[] = selectableExternalAgents.map((agent) => ({
-		value: agent.kind,
-		label: `${agent.name}${agent.installed ? "" : " (unavailable)"}`,
-	}));
-	if (hasLlmModels !== false) {
-		externalAgentSelectOptions.unshift({ value: "", label: "Built-in LLM agent" });
-	} else if (!currentExternalAgentKind) {
-		externalAgentSelectOptions.unshift({ value: "", label: "Select ACP agent" });
-	}
-	const shouldShowExternalAgentPicker = !isCron && selectableExternalAgents.length > 0;
-	const externalAgentStatus = currentExternalAgentKind
-		? currentExternalAgent?.installed === false
-			? `${currentExternalAgentName} unavailable`
-			: session?.externalSessionId
-				? `${currentExternalAgentName} session ${session.externalSessionId}`
-				: `${currentExternalAgentName} bound`
-		: "";
 	const hasCurrentNodeOption = currentNodeId === "" || nodeOptions.some((node) => node.nodeId === currentNodeId);
 	let nodeSelectOptions: SelectOption[] = [
 		{ value: "", label: "Local" },
@@ -645,7 +553,7 @@ export function SessionHeader({
 			/>
 		) : (
 			<span
-				className="chat-session-name"
+				className="chat-session-name min-w-0 truncate"
 				style={nameStyle}
 				title={canRename ? "Click to rename" : ""}
 				onClick={startRename}
@@ -704,25 +612,6 @@ export function SessionHeader({
 						disabled={switchingNode}
 					/>
 				)}
-				{showSelectors && shouldShowExternalAgentPicker && (
-					<div className="flex items-center gap-1.5" data-testid="external-agent-picker">
-						<ComboSelect
-							options={externalAgentSelectOptions}
-							value={currentExternalAgentKind}
-							onChange={onExternalAgentChange}
-							placeholder="External agent"
-							searchable={false}
-							allowEmpty={false}
-							fullWidth={false}
-							disabled={switchingExternalAgent}
-						/>
-						{externalAgentStatus && (
-							<span className="text-xs text-[var(--text-muted)]" title={externalAgentStatus}>
-								{externalAgentStatus}
-							</span>
-						)}
-					</div>
-				)}
 				{!nameOwnLine && showName && nameControl}
 				{!nameOwnLine && renameCta}
 				{showArchive && canArchive && (
@@ -732,6 +621,21 @@ export function SessionHeader({
 						title={session?.archived ? "Unarchive session" : "Archive session"}
 					>
 						{session?.archived ? "Unarchive" : "Archive"}
+					</button>
+				)}
+				{canUnbindChannel && (
+					<button
+						className={actionButtonClass}
+						onClick={onUnbindChannel}
+						disabled={unbinding}
+						data-testid="session-unbind-channel"
+						title={
+							boundChannelLabel
+								? `Attached to ${boundChannelLabel}. Runs without tools or private context until released.`
+								: "Attached to a channel. Runs without tools or private context until released."
+						}
+					>
+						{unbinding ? "Releasing…" : "Release channel"}
 					</button>
 				)}
 				{showFork && !isCron && (
@@ -754,7 +658,21 @@ export function SessionHeader({
 						Share
 					</button>
 				)}
-				{showDelete && !isMain && (
+				{showSaveMarkdown && (
+					<button
+						type="button"
+						className={`${actionButtonClass} inline-flex items-center gap-1.5`}
+						onClick={onSaveMarkdown}
+						title="Save as Markdown"
+						aria-label="Save as Markdown"
+						aria-busy={savingMarkdown}
+						disabled={savingMarkdown}
+					>
+						<span className="icon icon-sm icon-document shrink-0" />
+						<span className="hidden md:inline">Save .md</span>
+					</button>
+				)}
+				{showDelete && (
 					<button
 						className={`${actionButtonClass} chat-session-btn-danger inline-flex items-center gap-1.5`}
 						onClick={onDelete}

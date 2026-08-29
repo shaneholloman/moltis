@@ -35,6 +35,7 @@ pub struct WhatsAppPlugin {
     message_log: Option<Arc<dyn MessageLog>>,
     event_sink: Option<Arc<dyn ChannelEventSink>>,
     data_dir: PathBuf,
+    identity_name: Option<String>,
     probe_cache: RwLock<HashMap<String, (ChannelHealthSnapshot, Instant)>>,
 }
 
@@ -50,8 +51,16 @@ impl WhatsAppPlugin {
             message_log: None,
             event_sink: None,
             data_dir,
+            identity_name: None,
             probe_cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Agent identity name, used as the WhatsApp push name unless an account
+    /// sets its own.
+    pub fn with_identity_name(mut self, name: Option<String>) -> Self {
+        self.identity_name = name;
+        self
     }
 
     pub fn with_message_log(mut self, log: Arc<dyn MessageLog>) -> Self {
@@ -91,7 +100,7 @@ impl WhatsAppPlugin {
     }
 
     /// Get the config for a specific account (serialized to JSON).
-    pub fn account_config(&self, account_id: &str) -> Option<serde_json::Value> {
+    pub async fn account_config(&self, account_id: &str) -> Option<serde_json::Value> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
             .get(account_id)
@@ -108,7 +117,7 @@ impl WhatsAppPlugin {
 
     /// Update the in-memory config for an account without restarting.
     /// Use for allowlist changes that don't need re-pairing.
-    pub fn update_account_config(
+    pub async fn update_account_config(
         &self,
         account_id: &str,
         config: serde_json::Value,
@@ -176,6 +185,7 @@ impl ChannelPlugin for WhatsAppPlugin {
             self.data_dir.clone(),
             self.message_log.clone(),
             self.event_sink.clone(),
+            self.identity_name.clone(),
         )
         .await
         .map_err(|e| moltis_channels::Error::unavailable(format!("whatsapp start: {e}")))?;
@@ -230,21 +240,21 @@ impl ChannelPlugin for WhatsAppPlugin {
         accounts.keys().cloned().collect()
     }
 
-    fn account_config(&self, account_id: &str) -> Option<Box<dyn ChannelConfigView>> {
+    async fn account_config(&self, account_id: &str) -> Option<Box<dyn ChannelConfigView>> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
             .get(account_id)
             .map(|s| Box::new(s.config.clone()) as Box<dyn ChannelConfigView>)
     }
 
-    fn account_config_json(&self, account_id: &str) -> Option<serde_json::Value> {
+    async fn account_config_json(&self, account_id: &str) -> Option<serde_json::Value> {
         let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
             .get(account_id)
             .and_then(|s| serde_json::to_value(&s.config).ok())
     }
 
-    fn update_account_config(
+    async fn update_account_config(
         &self,
         account_id: &str,
         config: serde_json::Value,
@@ -385,10 +395,10 @@ mod tests {
         assert!(plugin.account_ids().is_empty());
     }
 
-    #[test]
-    fn account_config_returns_none_for_unknown() {
+    #[tokio::test]
+    async fn account_config_returns_none_for_unknown() {
         let plugin = WhatsAppPlugin::new(PathBuf::from("/tmp/test"));
-        assert!(plugin.account_config("nonexistent").is_none());
+        assert!(plugin.account_config("nonexistent").await.is_none());
     }
 
     #[test]

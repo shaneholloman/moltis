@@ -12,6 +12,7 @@
 
 pub mod auth;
 pub mod client;
+mod client_slot;
 pub mod config_parsing;
 pub mod error;
 pub mod legacy_sse_transport;
@@ -33,5 +34,6 @@ pub use {
     registry::{McpOAuthConfig, McpRegistry, McpServerConfig, TransportType},
     tool_bridge::{McpAgentTool, McpToolBridge},
     traits::{McpClientTrait, McpTransport},
+    transport::StdioLaunchOptions,
     types::{McpManagerError, McpTransportError},
 };

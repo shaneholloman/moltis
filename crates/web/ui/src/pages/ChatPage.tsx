@@ -19,7 +19,7 @@ import {
 import { SessionHeader } from "../components/SessionHeader";
 import { formatTokens, sendRpc } from "../helpers";
 import { initMediaDrop, teardownMediaDrop } from "../media-drop";
-import { bindModelComboEvents, modelDisplayLabel, modelTitle } from "../models";
+import { bindModelComboEvents, fetchModels, modelDisplayLabel, modelTitle } from "../models";
 import { bindNodeComboEvents, fetchNodes, unbindNodeEvents } from "../nodes-selector";
 import { bindProjectComboEvents } from "../project-combo";
 import { fetchProjects } from "../projects";
@@ -670,6 +670,7 @@ function mountSessionHeaderControls(): void {
 			<SessionHeader
 				showSelectors={false}
 				showName={false}
+				showSaveMarkdown={true}
 				showStop={false}
 				actionButtonClass={
 					"text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)] text-[var(--muted)]"
@@ -731,8 +732,10 @@ function initializeChatControls(): void {
 	S.setModelComboLabel(S.$("modelComboLabel"));
 	S.setModelDropdown(S.$("modelDropdown"));
 	S.setModelSearchInput(S.$("modelSearchInput"));
+	S.modelSearchInput?.setAttribute("placeholder", "Search models or ACP agents...");
 	S.setModelDropdownList(S.$("modelDropdownList"));
 	bindModelComboEvents();
+	void fetchModels();
 	bindReasoningToggle();
 	S.setNodeCombo(S.$("nodeCombo"));
 	S.setNodeComboBtn(S.$("nodeComboBtn"));
@@ -841,7 +844,11 @@ const chatPageHTML =
 	'<div class="chat-toolbar h-12 px-4 border-b border-[var(--border)] bg-[var(--surface)] flex items-center gap-2" style="grid-row:1;">' +
 	'<div id="nodeCombo" class="model-combo hidden"><button id="nodeComboBtn" class="model-combo-btn" type="button"><span class="icon icon-sm icon-server" style="flex-shrink:0;"></span><span id="nodeComboLabel">Local</span><span class="icon icon-sm icon-chevron-down model-combo-chevron"></span></button><div id="nodeDropdown" class="model-dropdown hidden" tabindex="-1"><div id="nodeDropdownList" class="model-dropdown-list"></div></div></div>' +
 	'<div id="projectCombo" class="model-combo hidden"><button id="projectComboBtn" class="model-combo-btn" type="button"><span class="icon icon-sm icon-folder" style="flex-shrink:0;"></span><span id="projectComboLabel">No project</span><span class="icon icon-sm icon-chevron-down model-combo-chevron"></span></button><div id="projectDropdown" class="model-dropdown hidden"><div id="projectDropdownList" class="model-dropdown-list"></div></div></div>' +
-	'<div id="sessionNameMount" class="ml-auto flex items-center min-w-0"></div>' +
+	// overflow-hidden keeps a long session name inside its own box. Without it a
+	// crowded toolbar lets the name spill left underneath #projectCombo, which is
+	// position:relative and so paints on top — the name looks clickable but every
+	// click lands on the project combo instead.
+	'<div id="sessionNameMount" class="ml-auto flex items-center min-w-0 overflow-hidden"></div>' +
 	'<div id="sessionHeaderToolbarMount" class="flex items-center gap-1.5"></div>' +
 	'<button id="sandboxToggle" class="sandbox-toggle text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)] inline-flex items-center gap-1" title="Toggle sandbox mode"><span class="icon icon-md icon-lock shrink-0"></span><span id="sandboxLabel">direct</span></button>' +
 	'<div class="chat-badge-desktop-only" style="position:relative;display:inline-block"><button id="sandboxImageBtn" class="text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)] inline-flex items-center gap-1 text-[var(--muted)]" title="Sandbox image"><span class="icon icon-md icon-cube shrink-0"></span><span id="sandboxImageLabel" class="max-w-[120px] truncate">unavailable</span></button><div id="sandboxImageDropdown" class="hidden" style="position:absolute;top:100%;left:0;z-index:50;margin-top:4px;min-width:200px;max-height:300px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);"></div></div>' +
@@ -851,7 +858,7 @@ const chatPageHTML =
 	'<div id="sessionActionsMount" class="flex items-center gap-1.5"></div></div>' +
 	'<div id="debugModal" class="provider-modal-backdrop hidden"><div class="provider-modal" style="width:min(980px,96vw);max-width:96vw;max-height:88vh;"><div class="provider-modal-header"><div class="provider-item-name">Debug context</div><button id="debugModalCloseBtn" type="button" class="provider-btn provider-btn-secondary provider-btn-sm">Close</button></div><div class="provider-modal-body" style="padding:0;overflow:hidden;"><div id="debugPanel" class="px-4 py-3 overflow-y-auto" style="max-height:72vh;"></div></div></div></div>' +
 	'<div id="fullContextModal" class="provider-modal-backdrop hidden"><div class="provider-modal" style="width:min(1080px,96vw);max-width:96vw;max-height:88vh;"><div class="provider-modal-header"><div class="provider-item-name">Full context</div><button id="fullContextModalCloseBtn" type="button" class="provider-btn provider-btn-secondary provider-btn-sm">Close</button></div><div class="provider-modal-body" style="padding:0;overflow:hidden;"><div id="fullContextPanel" class="px-4 py-3 overflow-y-auto" style="max-height:72vh;"></div></div></div></div>' +
-	'<div class="p-4 flex flex-col gap-2" id="messages" style="grid-row:3;overflow-y:auto;min-height:0;min-width:0"></div>' +
+	'<div class="p-4 flex flex-col gap-2" id="messages" role="log" aria-label="Chat messages" style="grid-row:3;overflow-y:auto;min-height:0;min-width:0"></div>' +
 	'<div id="queuedMessages" class="queued-tray hidden" style="grid-row:4;"></div>' +
 	'<div class="chat-input-row bg-[var(--bg)]" style="grid-row:5;"><div id="chatComposer" class="chat-composer"><div class="chat-composer-input-line"><span id="chatCommandPrompt" class="chat-command-prompt chat-command-prompt-hidden" title="Command prompt symbol" aria-hidden="true">$</span><textarea id="chatInput" placeholder="Type a message..." rows="1" enterkeyhint="send" class="chat-composer-textarea"></textarea></div><div class="chat-composer-footer"><div class="chat-composer-tools"><div id="modelCombo" class="model-combo"><button id="modelComboBtn" class="model-combo-btn" type="button"><span id="modelComboLabel">loading\u2026</span><span class="icon icon-sm icon-chevron-down model-combo-chevron"></span></button><div id="modelDropdown" class="model-dropdown hidden"><input id="modelSearchInput" type="text" placeholder="Search models\u2026" class="model-search-input" autocomplete="off" /><div id="modelDropdownList" class="model-dropdown-list"></div></div></div><div id="reasoningCombo" class="model-combo hidden"><button id="reasoningComboBtn" class="model-combo-btn" type="button" title="Reasoning effort"><span class="icon icon-sm icon-brain" style="flex-shrink:0;"></span><span id="reasoningComboLabel">Off</span><span class="icon icon-sm icon-chevron-down model-combo-chevron"></span></button><div id="reasoningDropdown" class="model-dropdown hidden"><div id="reasoningDropdownList" class="model-dropdown-list"></div></div></div></div><div id="tokenBar" class="token-bar"></div><div class="chat-composer-actions"><input id="attachInput" class="hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple /><button id="attachBtn" type="button" title="Attach images" class="chat-composer-icon-btn"><span class="icon icon-lg icon-paperclip"></span></button><button id="micBtn" disabled title="Click to start recording" class="mic-btn chat-composer-icon-btn"><span class="icon icon-lg icon-microphone"></span></button><button id="vadBtn" disabled title="Conversation mode (VAD)" class="vad-btn chat-composer-icon-btn"><span class="icon icon-lg icon-waveform"></span></button><button id="sendBtn" disabled aria-label="Send" title="Send" class="chat-composer-send-btn"><span class="icon icon-lg icon-arrow-up"></span></button></div></div></div></div></div>';
 

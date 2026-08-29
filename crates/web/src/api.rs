@@ -11,18 +11,23 @@ use {
         http::StatusCode,
         response::{IntoResponse, Response},
     },
-    moltis_httpd::AppState,
+    moltis_httpd::{AppState, auth_middleware::RequireAdmin},
     moltis_tools::image_cache::ImageBuilder,
     secrecy::{ExposeSecret, Secret},
     tracing::warn,
 };
 
-use crate::templates::{build_nav_counts, onboarding_completed};
+use crate::{
+    container_management::{managed_container_name, managed_container_prefixes},
+    image_input::{ImageInputError, ValidatedImageRequest, package_check_args},
+    templates::{build_nav_counts, onboarding_completed},
+};
 
 const MCP_LIST_FAILED: &str = "MCP_LIST_FAILED";
 const IMAGE_CACHE_DELETE_FAILED: &str = "IMAGE_CACHE_DELETE_FAILED";
 const IMAGE_CACHE_PRUNE_FAILED: &str = "IMAGE_CACHE_PRUNE_FAILED";
 const SANDBOX_CHECK_PACKAGES_FAILED: &str = "SANDBOX_CHECK_PACKAGES_FAILED";
+const SANDBOX_IMAGE_INPUT_INVALID: &str = "SANDBOX_IMAGE_INPUT_INVALID";
 const SANDBOX_BACKEND_UNAVAILABLE: &str = "SANDBOX_BACKEND_UNAVAILABLE";
 const SANDBOX_IMAGE_NAME_REQUIRED: &str = "SANDBOX_IMAGE_NAME_REQUIRED";
 const SANDBOX_IMAGE_PACKAGES_REQUIRED: &str = "SANDBOX_IMAGE_PACKAGES_REQUIRED";
@@ -62,41 +67,10 @@ fn configured_secret(secret: &Option<Secret<String>>) -> bool {
         .is_some_and(|secret| !secret.expose_secret().is_empty())
 }
 
-fn sandbox_container_prefix_from_config(config: &moltis_config::MoltisConfig) -> String {
-    config
-        .tools
-        .exec
-        .sandbox
-        .container_prefix
-        .clone()
-        .unwrap_or_else(|| "moltis-sandbox".to_string())
-}
-
-fn browser_container_prefix_from_config(config: &moltis_config::MoltisConfig) -> String {
-    let _ = config;
-    "moltis-browser".to_string()
-}
-
-fn managed_container_prefixes(config: &moltis_config::MoltisConfig) -> Vec<String> {
-    let sandbox_prefix = sandbox_container_prefix_from_config(config);
-    let browser_prefix = browser_container_prefix_from_config(config);
-    if sandbox_prefix == browser_prefix {
-        vec![sandbox_prefix]
-    } else {
-        vec![sandbox_prefix, browser_prefix]
-    }
-}
-
 fn browser_image_repository(config: &moltis_config::MoltisConfig) -> Option<String> {
     let image = config.tools.browser.sandbox_image.trim();
     let (repo, _) = image.rsplit_once(':').unwrap_or((image, "latest"));
     (!repo.is_empty()).then(|| repo.to_string())
-}
-
-fn managed_container_name(config: &moltis_config::MoltisConfig, name: &str) -> bool {
-    managed_container_prefixes(config)
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
 }
 
 #[derive(serde::Deserialize)]
@@ -867,58 +841,54 @@ pub async fn api_prune_cached_images_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "pruned": count })).into_response()
 }
 
-pub async fn api_check_packages_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
-    let base = body
-        .get("base")
-        .and_then(|v| v.as_str())
-        .unwrap_or("ubuntu:25.10")
-        .trim()
-        .to_string();
-    let packages: Vec<String> = body
-        .get("packages")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if packages.is_empty() {
+pub async fn api_check_packages_handler(
+    _admin: RequireAdmin,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let request = match ValidatedImageRequest::try_from(body) {
+        Ok(request) => request,
+        Err(ImageInputError::ImageNameInvalid) => {
+            return api_error_response(
+                StatusCode::BAD_REQUEST,
+                SANDBOX_IMAGE_NAME_INVALID,
+                "name must be alphanumeric, dash, or underscore",
+            );
+        },
+        Err(error) => {
+            return api_error_response(
+                StatusCode::BAD_REQUEST,
+                SANDBOX_IMAGE_INPUT_INVALID,
+                error.to_string(),
+            );
+        },
+    };
+    if request.packages().is_empty() {
         return Json(serde_json::json!({ "found": {} })).into_response();
     }
-
-    let checks: Vec<String> = packages
-        .iter()
-        .map(|pkg| {
-            format!(
-                r#"if dpkg -s '{pkg}' >/dev/null 2>&1 || command -v '{pkg}' >/dev/null 2>&1; then echo "FOUND:{pkg}"; fi"#
-            )
-        })
-        .collect();
-    let script = checks.join("\n");
 
     let config = moltis_config::discover_and_load();
     let cli = moltis_tools::image_cache::DockerImageBuilder::for_backend(
         &config.tools.exec.sandbox.backend,
     )
     .cli_name();
-    let output = tokio::process::Command::new(cli)
-        .args(["run", "--rm", "--entrypoint", "sh", &base, "-c", &script])
+    let mut command = tokio::process::Command::new(cli);
+    command
+        .args(package_check_args(&request))
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await;
+        .stderr(std::process::Stdio::piped());
+    let output = command.output().await;
 
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let mut found = serde_json::Map::new();
-            for pkg in &packages {
-                let present = stdout.lines().any(|l| l.trim() == format!("FOUND:{pkg}"));
-                found.insert(pkg.clone(), serde_json::Value::Bool(present));
+            for package in request.packages() {
+                let marker = format!("FOUND:{package}");
+                let present = stdout.lines().any(|line| line.trim() == marker);
+                found.insert(
+                    package.as_str().to_string(),
+                    serde_json::Value::Bool(present),
+                );
             }
             Json(serde_json::json!({ "found": found })).into_response()
         },
@@ -1199,36 +1169,35 @@ pub async fn api_set_remote_backend_handler(
     }
 }
 
-pub async fn api_build_image_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
-    let name = body
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let base = body
-        .get("base")
-        .and_then(|v| v.as_str())
-        .unwrap_or("ubuntu:25.10")
-        .trim();
-    let packages: Vec<&str> = body
-        .get("packages")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if name.is_empty() {
+pub async fn api_build_image_handler(
+    _admin: RequireAdmin,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let request = match ValidatedImageRequest::try_from(body) {
+        Ok(request) => request,
+        Err(ImageInputError::ImageNameInvalid) => {
+            return api_error_response(
+                StatusCode::BAD_REQUEST,
+                SANDBOX_IMAGE_NAME_INVALID,
+                "name must be alphanumeric, dash, or underscore",
+            );
+        },
+        Err(error) => {
+            return api_error_response(
+                StatusCode::BAD_REQUEST,
+                SANDBOX_IMAGE_INPUT_INVALID,
+                error.to_string(),
+            );
+        },
+    };
+    let Some(name) = request.name() else {
         return api_error_response(
             StatusCode::BAD_REQUEST,
             SANDBOX_IMAGE_NAME_REQUIRED,
             "name is required",
         );
-    }
-    if packages.is_empty() {
+    };
+    if request.packages().is_empty() {
         return api_error_response(
             StatusCode::BAD_REQUEST,
             SANDBOX_IMAGE_PACKAGES_REQUIRED,
@@ -1236,24 +1205,19 @@ pub async fn api_build_image_handler(Json(body): Json<serde_json::Value>) -> imp
         );
     }
 
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return api_error_response(
-            StatusCode::BAD_REQUEST,
-            SANDBOX_IMAGE_NAME_INVALID,
-            "name must be alphanumeric, dash, or underscore",
-        );
-    }
-
-    let pkg_list = packages.join(" ");
+    let pkg_list = request
+        .packages()
+        .iter()
+        .map(|package| package.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
     let dockerfile_contents = format!(
-        "FROM {base}\n\
+        "FROM {}\n\
 RUN apt-get update && apt-get install -y {pkg_list}\n\
 RUN mkdir -p /home/sandbox\n\
 ENV HOME=/home/sandbox\n\
-WORKDIR /home/sandbox\n"
+WORKDIR /home/sandbox\n",
+        request.base()
     );
 
     let tmp_dir = std::env::temp_dir().join(format!("moltis-build-{}", uuid::Uuid::new_v4()));
@@ -1280,20 +1244,22 @@ WORKDIR /home/sandbox\n"
         &config.tools.exec.sandbox.backend,
     );
     tracing::debug!(
-        name,
+        name = name.as_str(),
         cli = builder.cli_name(),
         "starting image build via API"
     );
-    let result = builder.ensure_image(name, &dockerfile_path, &tmp_dir).await;
+    let result = builder
+        .ensure_image(name.as_str(), &dockerfile_path, &tmp_dir)
+        .await;
     let _ = std::fs::remove_dir_all(&tmp_dir);
     match result {
         Ok(tag) => {
-            tracing::info!(name, tag, "image build succeeded via API");
+            tracing::info!(name = name.as_str(), tag, "image build succeeded via API");
             Json(serde_json::json!({ "tag": tag })).into_response()
         },
         Err(e) => {
             let detail = e.to_string();
-            tracing::warn!(name, error = %detail, "image build failed via API");
+            tracing::warn!(name = name.as_str(), error = %detail, "image build failed via API");
             let message = if detail.contains("Cannot connect")
                 || detail.contains("connect to the Docker daemon")
                 || detail.contains("No such file or directory")
@@ -1317,9 +1283,11 @@ WORKDIR /home/sandbox\n"
 
 // ── Containers ───────────────────────────────────────────────────────────────
 
-pub async fn api_list_containers_handler() -> impl IntoResponse {
-    let config = moltis_config::discover_and_load();
-    let prefixes = managed_container_prefixes(&config);
+pub async fn api_list_containers_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let prefixes = managed_container_prefixes(
+        &state.gateway.config,
+        state.gateway.sandbox_router.as_deref(),
+    );
     match moltis_tools::sandbox::list_running_containers_for_prefixes(&prefixes).await {
         Ok(containers) => Json(serde_json::json!({ "containers": containers })).into_response(),
         Err(e) => api_error_response(
@@ -1330,9 +1298,15 @@ pub async fn api_list_containers_handler() -> impl IntoResponse {
     }
 }
 
-pub async fn api_stop_container_handler(Path(name): Path<String>) -> impl IntoResponse {
-    let config = moltis_config::discover_and_load();
-    if !managed_container_name(&config, &name) {
+pub async fn api_stop_container_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if !managed_container_name(
+        &state.gateway.config,
+        state.gateway.sandbox_router.as_deref(),
+        &name,
+    ) {
         return api_error_response(
             StatusCode::FORBIDDEN,
             SANDBOX_CONTAINER_PREFIX_MISMATCH,
@@ -1349,9 +1323,15 @@ pub async fn api_stop_container_handler(Path(name): Path<String>) -> impl IntoRe
     }
 }
 
-pub async fn api_remove_container_handler(Path(name): Path<String>) -> impl IntoResponse {
-    let config = moltis_config::discover_and_load();
-    if !managed_container_name(&config, &name) {
+pub async fn api_remove_container_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if !managed_container_name(
+        &state.gateway.config,
+        state.gateway.sandbox_router.as_deref(),
+        &name,
+    ) {
         return api_error_response(
             StatusCode::FORBIDDEN,
             SANDBOX_CONTAINER_PREFIX_MISMATCH,
@@ -1368,10 +1348,12 @@ pub async fn api_remove_container_handler(Path(name): Path<String>) -> impl Into
     }
 }
 
-pub async fn api_clean_all_containers_handler() -> impl IntoResponse {
-    let config = moltis_config::discover_and_load();
+pub async fn api_clean_all_containers_handler(State(state): State<AppState>) -> impl IntoResponse {
     let mut removed = 0usize;
-    for prefix in managed_container_prefixes(&config) {
+    for prefix in managed_container_prefixes(
+        &state.gateway.config,
+        state.gateway.sandbox_router.as_deref(),
+    ) {
         match moltis_tools::sandbox::clean_all_containers(&prefix).await {
             Ok(count) => removed += count,
             Err(e) => {

@@ -38,6 +38,7 @@ port = {port}                           # Port number (auto-generated for this i
 # bind = "127.0.0.1"                # Address to bind to ("0.0.0.0" for all interfaces)
 # http_request_logs = false              # Enable verbose Axum HTTP request/response logs (debugging)
 # ws_request_logs = false                # Enable WebSocket RPC request/response logs (debugging)
+# rpc_timeout_ms = 5000                  # Web UI WebSocket RPC reply timeout (milliseconds)
 # terminal_enabled = true                # Enable interactive host terminal in Settings > Terminal
                                          # Set to false to disable the unsandboxed shell in the web UI.
                                          # NOTE: this can be re-enabled via the web UI config editor.
@@ -214,7 +215,7 @@ port = {port}                           # Port number (auto-generated for this i
 # [providers.fireworks]
 # enabled = true
 # api_key = "..."                             # Or set FIREWORKS_API_KEY env var
-# models = ["accounts/fireworks/models/kimi-k2p5"]
+# models = ["accounts/fireworks/models/kimi-k2p6"]
 # fetch_models = true                          # Set false to skip remote discovery
 # base_url = "https://api.fireworks.ai/inference/v1"
 # alias = "fireworks"
@@ -285,6 +286,9 @@ port = {port}                           # Port number (auto-generated for this i
                                       #   "live-reload"            - Re-read MEMORY.md before each turn
                                       #   "frozen-at-session-start" - Freeze the first MEMORY.md snapshot per session
 # workspace_file_max_chars = 32000  # Optional: per-file prompt cap for AGENTS.md / TOOLS.md before truncation.
+# context_command = ""              # Optional command run before each turn; stdout is appended to prompt context.
+                                    #   Runs in the active project/worktree dir when set, else the server cwd.
+                                    #   Times out after 30s; stdout capped at 32,000 bytes.
 # priority_models = ["claude-opus-4-5", "gpt-5.6-sol", "gemini-3-flash"]  # Optional: models to pin first in selectors
 
 # ── Compaction ─────────────────────────────────────────────────────────────
@@ -447,14 +451,18 @@ port = {port}                           # Port number (auto-generated for this i
 # mode = "all"                      # "off" | "non-main" | "all" (recommended)
 # scope = "session"                 # "command" | "session" (recommended) | "global"
 # workspace_mount = "ro"            # "ro" | "rw" | "none"
+# managed_files_mount = "ro"        # Managed Files: "ro" | "rw" | "none"
 # home_persistence = "shared"       # "off" | "session" | "shared"
-# backend = "auto"                  # "auto" | "docker" | "apple-container"
+# backend = "auto"                  # "auto" | "docker" | "podman" | "apple-container" | "restricted-host" | "wasm"
 # no_network = true                 # Disable network access in sandbox
 # image = "custom-image:tag"        # Custom Docker image (default: auto-built)
 # packages = [...]                  # Packages installed in sandbox containers
 # host_data_dir = "/host/moltis-data" # Host path for Moltis data when running Moltis inside Docker
 # gpus = "all"                      # GPU passthrough: "all", "device=0", "device=0,1"
                                     # (Docker/Podman only, ignored for other backends)
+# allow_host_podman = false         # DANGEROUS, Linux only: host API removes sandbox boundary
+# allow_nested_podman = false       # DANGEROUS: privileged nested Podman sandbox
+                                    # Both require backend = "podman" and are mutually exclusive
 
 # [tools.exec.sandbox.resource_limits]
 # memory_limit = "512M"             # Memory limit (e.g., "512M", "1G")
@@ -519,11 +527,15 @@ port = {port}                           # Port number (auto-generated for this i
 # device_scale_factor = 2.0         # HiDPI/Retina scaling
 # max_instances = 3                 # Maximum concurrent browser instances
 # idle_timeout_secs = 300           # Close idle browsers after this many seconds
-# sandbox = false                   # Run browser in container for isolation
 # allowed_domains = []              # Domain restrictions (empty = all allowed)
 # chrome_path = "/path/to/chrome"   # Custom Chrome binary path
 # obscura_path = "/path/to/obscura" # Custom Obscura binary path for browser = "obscura"
+# obscura_stealth = true             # Pass --stealth (full TLS mode needs a stealth build)
 # lightpanda_path = "/path/to/lightpanda" # Custom Lightpanda binary path for browser = "lightpanda"
+# sandbox_image = "docker.io/browserless/chrome" # Default Browserless v1 image
+# browserless_api_version = "v1"    # Must match the Browserless image API
+# Browserless v2 example: set sandbox_image = "ghcr.io/browserless/chromium:v2.56.0"
+# and browserless_api_version = "v2" together.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SKILLS
@@ -565,6 +577,64 @@ port = {port}                           # Port number (auto-generated for this i
 # [metrics]
 # enabled = true                    # Enable metrics collection
 # prometheus_endpoint = true        # Expose /metrics endpoint
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INSTRUMENTATION (Langfuse / OpenTelemetry / Datadog)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Exports completed agent runs — LLM calls, tool calls and retrievals — to an
+# external backend. Observations are immutable and sent once, after completion.
+# Disabled by default: enabling it sends conversation data to a third party.
+# See docs/src/instrumentation.md.
+#
+# Backends deliberately receive different data. Langfuse gets the full
+# conversation, token usage and session context for LLM observability and cost
+# inference. Prompt Management, datasets, evaluators and media uploads are not
+# integrated. OTLP and Datadog receive operational shape only.
+
+# [instrumentation]
+# enabled = false                   # Master switch, gates every backend
+# environment = "production"        # Reported to every backend
+# sample_rate = 1.0                 # Fraction of turns traced (0.0-1.0)
+# redact = ["customer_ref"]         # Extra keys to redact; extends the defaults
+# queue_capacity = 10000            # Must be nonzero; full queues drop events
+# flush_interval_ms = 5000          # Must be nonzero
+# max_batch_bytes = 3000000         # Must be nonzero
+
+# [instrumentation.langfuse]
+# enabled = false
+# host = "https://cloud.langfuse.com"   # Or a self-hosted URL
+# public_key = "pk-lf-..."
+# Prefer MOLTIS_INSTRUMENTATION__LANGFUSE__SECRET_KEY in the process environment.
+# A secret_key config value is also accepted.
+# capture_input = true              # Turn and LLM inputs
+# capture_output = true             # Turn and LLM outputs
+# capture_tool_io = true            # Tool arguments and results
+# timeout_secs = 10                 # Must be nonzero
+
+# [instrumentation.otlp]            # Grafana Tempo/Alloy, Honeycomb, a collector
+# enabled = false
+# endpoint = "http://localhost:4318/v1/traces"
+# content = "metadata_only"         # "full" | "metadata_only" | "none"
+# emit_user_id = false              # High-cardinality in an APM index
+# timeout_secs = 10                 # Must be nonzero
+
+# [instrumentation.datadog]         # Via the Datadog Agent's OTLP intake
+# enabled = false
+# endpoint = "http://localhost:4318/v1/traces"
+# service = "moltis"
+# content = "metadata_only"
+# timeout_secs = 10                 # Must be nonzero
+
+# Reaction feedback. A thumbs up/down on a reply in Telegram, Discord or Slack
+# becomes a BOOLEAN "user-feedback" score through Langfuse's dedicated Scores
+# API. Score creates/replacements and deletions retain queue order. Lists accept
+# raw emoji or shortcodes; empty means the built-in vocabulary.
+# [instrumentation.feedback]
+# enabled = true
+# positive = ["\U0001F44D", "+1", "thumbsup"]
+# negative = ["\U0001F44E", "-1", "thumbsdown"]
+# link_retention_days = 30          # How long a reply stays attributable
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CRON
@@ -663,8 +733,11 @@ port = {port}                           # Port number (auto-generated for this i
 # [memory]
 # style = "hybrid"                  # "hybrid" | "prompt-only" | "search-only" | "off"
 # agent_write_mode = "hybrid"       # "hybrid" | "prompt-only" | "search-only" | "off"
-# backend = "builtin"               # "builtin" | "qmd"
+# backend = "builtin"               # "builtin" | "qmd" | "zvec"
 # provider = "auto"                 # "local" | "ollama" | "openai" | "custom"
+# db_path = "memory.zvec"           # Zvec collection directory (only when backend = "zvec")
+# vector_weight = 0.7               # Weight for vector similarity in hybrid search
+# keyword_weight = 0.3              # Weight for keyword/FTS similarity in hybrid search
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHONE (Telephony Providers)
@@ -709,6 +782,8 @@ port = {port}                           # Port number (auto-generated for this i
 # [external_agents.agents.claude-code]
 # binary = "claude"                 # Override binary path (default: look up on $PATH)
 # args = ["-p", "--output-format", "json"]
+# models = ["claude-opus-4-8", "claude-sonnet-4-6"] # Optional model choices shown in /model
+# efforts = ["high", "xhigh"]       # Optional effort choices shown in /model
 # working_dir = "."                 # Override working directory
 # timeout_secs = 300                # Session timeout
 # use_tmux = false                  # Force tmux backend (vs direct PTY)
@@ -718,6 +793,8 @@ port = {port}                           # Port number (auto-generated for this i
 # [external_agents.agents.codex]
 # binary = "codex"
 # args = ["app-server"]
+# models = ["gpt-5.5", "gpt-5.4"]
+# efforts = ["medium", "high", "xhigh"]
 
 # Generic manual ACP server for advanced/custom CLIs not listed below.
 # If Moltis is missing a named default for an ACP agent, check the official
@@ -776,6 +853,10 @@ port = {port}                           # Port number (auto-generated for this i
 # binary = "kimi"
 # args = ["acp"]
 
+# [external_agents.agents.acp-minimax-code]
+# binary = "mcode"
+# args = ["acp"]
+
 # [external_agents.agents.acp-stakpak]
 # binary = "stakpak"
 # args = ["acp"]
@@ -804,12 +885,57 @@ port = {port}                           # Port number (auto-generated for this i
 # [channels]
 # offered = ["telegram", "whatsapp", "msteams", "discord", "slack", "matrix", "nostr", "signal"]
 
+# Example WhatsApp account. Pair the account by scanning the QR code after startup.
+# [channels.whatsapp.my-bot]
+# push_name = "Moltis"        # Falls back to [identity] name, then "Moltis".
+# dm_policy = "allowlist"
+# allowlist = []
+
 # Example Slack account. api_base_url defaults to Slack; set it only for
 # Slack-compatible proxies, mock servers, or gateways.
 # [channels.slack.my-bot]
 # bot_token = "xoxb-..."
 # app_token = "xapp-..."
 # api_base_url = "https://slack.com/api"
+# dm_policy = "allowlist"
+# allowlist = []
+# operators = []             # Exact sender IDs allowed to run privileged commands; empty means nobody.
+# untrusted_audience = "public" # "trusted" makes MCP and other trusted-audience tools eligible.
+# untrusted_tools = "deny_all"  # "policy" lets configured policy layers decide.
+# thread_replies = true
+# stream_mode = "edit_in_place" # use "native" for Slack live text and tool task cards
+# ack_reactions = true       # 👀 on receipt, phase emoji while working, ✅/❌ on completion
+# reaction_triggers = false  # route user reactions into the agent (react ✅ to approve)
+# rich_blocks = false        # render replies as Block Kit blocks (fallback to plain text)
+# otp_self_approval = true
+# otp_cooldown_secs = 300
+
+# Example Microsoft Teams account.
+# [channels.msteams.my-bot]
+# app_id = "00000000-0000-0000-0000-000000000000"
+# app_password = "..."
+# dm_policy = "allowlist"
+# allowlist = []
+# operators = []             # Exact sender IDs; no allowlist fallback.
+# otp_self_approval = true
+# otp_cooldown_secs = 300
+
+# Example Nostr account. Handles NIP-04/NIP-59 encrypted DMs and, when `groups`
+# is set, NIP-29 group chat on Buzz-style relays (https://github.com/block/buzz).
+# [channels.nostr.my-bot]
+# secret_key = "nsec1..."
+# relays = ["wss://relay.damus.io", "wss://relay.nostr.band", "wss://nos.lol"]
+# dm_policy = "allowlist"
+# allowed_pubkeys = ["npub1..."]
+# # Buzz / NIP-29 group chat: the `h`-tag group ids the bot joins. Requires a
+# # relay that supports NIP-29 + NIP-42 (Buzz relays do). Empty = DM-only.
+# # This list is also the allowlist — messages for any other group are dropped.
+# groups = ["buzz-general"]
+# group_mention_mode = "mention"  # mention (p-tagged only) | always | none (receive-only)
+# # Dialect for bot-initiated group messages. Both kinds are always read and
+# # replies mirror the message they answer; set buzz_v2 on a Buzz relay.
+# group_message_kind = "nip29"    # nip29 (kind:9) | buzz_v2 (kind:40002)
+# group_ack_reactions = true      # 👀 on receipt, phase glyphs, ✅/❌ at the end (NIP-25)
 
 # See docs or defaults.toml for full channel configuration examples
 # (WhatsApp, Telegram, Teams, Discord, Slack, Matrix, Nostr, Signal).

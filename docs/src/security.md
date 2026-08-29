@@ -107,6 +107,38 @@ provides a proxy-filtered allowlist — only connections to explicitly approved
 domains are permitted. All requests (allowed and denied) are recorded in the
 network audit log for review.
 
+### Managed Files privacy boundary
+
+[Managed Files](managed-files.md) are one shared tree at `<data_dir>/files`,
+not a per-session store. The deliberate product policy is that **all agent
+sessions, including channel-originated sessions, can read that tree whenever
+their available tools and sandbox mount permit it**. Channel sessions remain
+subject to channel authorization and tool policy, but there is no additional
+Files-level partition after access is permitted.
+
+This is especially important for health information and other private data. Do
+not upload such files unless every agent session and channel operator with tool
+access may read them. To prevent local container sandboxes from seeing the
+tree, set:
+
+```toml
+[tools.exec.sandbox]
+managed_files_mount = "none"
+```
+
+The default is `ro`, which prevents sandbox writes but still permits reads.
+`rw` also permits agent mutations. Docker, Podman, and Apple Container support
+these mount modes initially; WASM and remote backends do not yet mount Managed
+Files. Host-side tools need separate restriction through tool/channel policy
+and, for the native filesystem tools, `[tools.fs]` path rules.
+
+The Settings UI and `/api/files/*` remain behind normal gateway
+authentication. Read operations require an API identity with `operator.read`
+(or admin), while uploads, renames, moves, and deletes require
+`operator.write` (or admin). The service rejects path traversal, symbolic
+links, and special files, caps each upload at 1 GiB, and forces browser
+downloads to use attachment disposition.
+
 ## Channel Authorization
 
 Channels (Telegram, Slack, etc.) allow external parties to interact with your
@@ -122,13 +154,50 @@ interact with the agent.
 UI: Settings > Channels > Pending Senders
 ```
 
-### Per-Channel Permissions
+### Operators vs. Allowed Senders
 
-Each channel can have different permission levels:
+Being allowed to message the bot is **not** permission to run commands on the
+host. Shell access is gated separately by each account's `operators` list:
 
-- **Read-only**: Sender can ask questions, agent responds
-- **Execute**: Sender can trigger actions (with approval still required)
-- **Admin**: Full access including configuration changes
+| | Guest | Operator in proven DM | Operator in shared/unknown chat |
+|---|---|---|---|
+| Chat with the agent | yes | yes | yes |
+| Room-local slash commands | yes | yes | yes |
+| Privileged slash commands | no | yes | no |
+| `/sh`, shell command mode | no | yes | no |
+| Agent tools and external agents | no | yes | no |
+| Owner memory, profile, project context | no | yes | no |
+
+Denial is enforced before command dispatch, before shell command-mode rewrite,
+and with a deny-all request policy. Host-owned tool audience metadata provides
+an additional ceiling, and name-based configuration cannot widen the deny-all
+channel policy. Untrusted turns also omit private prompt and memory context.
+
+With no `operators` list, **no one** has privileged channel access. Configure it under
+**Settings → Channels → Edit → Operators**, or see
+[Channels → Operators](./channels.md#operators-privileged-senders).
+
+```admonish danger title="Public channels"
+On a public Discord guild or any shared group chat, every member may clear the
+access gate. Every turn therefore runs without tools or owner-private context,
+even when an operator sends it. `/sh` and privileged commands are also denied;
+move privileged work to an operator DM or the authenticated web UI. Adapters
+that cannot prove a chat is direct treat it as shared.
+```
+
+Discord, Microsoft Teams, and Matrix currently fall into that conservative
+category even for actual DMs. Their normal chat remains available, but tools,
+private context, `/sh`, location updates, and privileged commands are denied.
+
+Telephony is in that category permanently: a call's only identifier is the
+caller number, and caller ID is spoofable, so it can never authenticate an
+operator. Adding a phone number to `operators` grants nothing.
+
+Sessions bound to a chat — including a working session an operator moved there
+with `/attach` — are untrusted for *every* non-gateway caller, so cron jobs,
+webhooks, and `sessions_send` also run tool-free against them. Release the
+binding to restore full access; see
+[Channels → Channel-bound sessions](./channels.md#channel-bound-sessions).
 
 ### Channel Isolation
 

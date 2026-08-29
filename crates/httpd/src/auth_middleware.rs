@@ -235,6 +235,24 @@ pub async fn auth_gate(
     }
 }
 
+/// Exactly the three Slack callback endpoints, and nothing else under the
+/// Slack namespace.
+///
+/// Matching the whole `/api/channels/slack/` prefix would also expose any
+/// future management route added there, so the suffix is checked explicitly.
+#[cfg(feature = "slack")]
+pub(crate) fn is_slack_callback_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/channels/slack/") else {
+        return false;
+    };
+    matches!(
+        rest.split_once('/'),
+        Some((account_id, suffix))
+            if !account_id.is_empty()
+                && matches!(suffix, "events" | "interactions" | "commands")
+    )
+}
+
 /// Paths that never require authentication.
 #[cfg(feature = "web-ui")]
 fn is_public_path(path: &str) -> bool {
@@ -243,6 +261,7 @@ fn is_public_path(path: &str) -> bool {
         "/health"
             | "/auth/callback"
             | "/manifest.json"
+            | "/offline.html"
             | "/sw.js"
             | "/login"
             | "/setup-required"
@@ -255,6 +274,20 @@ fn is_public_path(path: &str) -> bool {
                 path.starts_with("/api/channels/msteams/")
             }
             #[cfg(not(feature = "msteams"))]
+            {
+                false
+            }
+        }
+        // Slack calls these endpoints itself and cannot present a Moltis
+        // session, so gateway auth would reject every callback before the
+        // handler runs. They are not unauthenticated: each verifies Slack's
+        // HMAC signature (and timestamp freshness) before doing any work.
+        || {
+            #[cfg(feature = "slack")]
+            {
+                is_slack_callback_path(path)
+            }
+            #[cfg(not(feature = "slack"))]
             {
                 false
             }
@@ -341,7 +374,6 @@ pub struct AuthSession(pub AuthIdentity);
 impl<S> FromRequestParts<S> for AuthSession
 where
     S: Send + Sync,
-    Arc<CredentialStore>: FromRef<S>,
     Arc<GatewayState>: FromRef<S>,
 {
     type Rejection = (StatusCode, &'static str);
@@ -354,15 +386,17 @@ where
 
         // Fallback for auth routes (allowlisted, middleware skipped):
         // validate session cookie directly, or check the local-bypass logic.
-        let store = Arc::<CredentialStore>::from_ref(state);
         let gw = Arc::<GatewayState>::from_ref(state);
+        let Some(store) = gw.credential_store.as_ref() else {
+            return Err((StatusCode::UNAUTHORIZED, "not authenticated"));
+        };
 
         let is_local = parts
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .is_some_and(|ci| is_local_connection(&parts.headers, ci.0, gw.behind_proxy));
 
-        match check_auth(&store, &parts.headers, is_local).await {
+        match check_auth(store, &parts.headers, is_local).await {
             AuthResult::Allowed(identity) => Ok(AuthSession(identity)),
             _ => Err((StatusCode::UNAUTHORIZED, "not authenticated")),
         }
@@ -381,7 +415,6 @@ pub struct RequireAdmin(pub AuthIdentity);
 impl<S> FromRequestParts<S> for RequireAdmin
 where
     S: Send + Sync,
-    Arc<CredentialStore>: FromRef<S>,
     Arc<GatewayState>: FromRef<S>,
 {
     type Rejection = (StatusCode, &'static str);
@@ -431,6 +464,259 @@ pub fn parse_cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
+
+    #[derive(Clone)]
+    struct ExtractorTestState {
+        gateway: Arc<GatewayState>,
+    }
+
+    impl FromRef<ExtractorTestState> for Arc<GatewayState> {
+        fn from_ref(state: &ExtractorTestState) -> Self {
+            Arc::clone(&state.gateway)
+        }
+    }
+
+    #[tokio::test]
+    async fn require_admin_checks_extension_identity_scope() {
+        let state = ExtractorTestState {
+            gateway: GatewayState::new(
+                moltis_gateway::auth::resolve_auth(None, None),
+                moltis_gateway::services::GatewayServices::noop(),
+            ),
+        };
+        let mut read_parts = axum::http::Request::new(axum::body::Body::empty())
+            .into_parts()
+            .0;
+        read_parts.extensions.insert(AuthIdentity {
+            method: AuthMethod::ApiKey,
+            scopes: vec!["operator.read".to_string()],
+        });
+        let read_result = RequireAdmin::from_request_parts(&mut read_parts, &state).await;
+        assert!(matches!(read_result, Err((StatusCode::FORBIDDEN, _))));
+
+        let mut admin_parts = axum::http::Request::new(axum::body::Body::empty())
+            .into_parts()
+            .0;
+        admin_parts.extensions.insert(AuthIdentity {
+            method: AuthMethod::ApiKey,
+            scopes: vec!["operator.admin".to_string()],
+        });
+        let admin_result = RequireAdmin::from_request_parts(&mut admin_parts, &state).await;
+        assert!(admin_result.is_ok());
+
+        for method in [
+            AuthMethod::Password,
+            AuthMethod::Passkey,
+            AuthMethod::Loopback,
+        ] {
+            let mut unrestricted_parts = axum::http::Request::new(axum::body::Body::empty())
+                .into_parts()
+                .0;
+            unrestricted_parts.extensions.insert(AuthIdentity {
+                method,
+                scopes: Vec::new(),
+            });
+            let result = RequireAdmin::from_request_parts(&mut unrestricted_parts, &state).await;
+            assert!(
+                result.is_ok(),
+                "{method:?} identity should have full access"
+            );
+        }
+
+        let mut fallback_parts = axum::http::Request::new(axum::body::Body::empty())
+            .into_parts()
+            .0;
+        let fallback_result = AuthSession::from_request_parts(&mut fallback_parts, &state).await;
+        assert!(matches!(
+            fallback_result,
+            Err((StatusCode::UNAUTHORIZED, _))
+        ));
+    }
+
+    #[cfg(all(feature = "slack", feature = "web-ui"))]
+    #[test]
+    fn slack_callback_paths_bypass_gateway_auth_but_nothing_else_does() {
+        // Slack cannot present a Moltis session; these three verify Slack's
+        // HMAC signature themselves.
+        for p in [
+            "/api/channels/slack/my-bot/events",
+            "/api/channels/slack/my-bot/interactions",
+            "/api/channels/slack/my-bot/commands",
+        ] {
+            assert!(
+                is_public_path(p),
+                "{p} must reach its HMAC-verifying handler"
+            );
+        }
+        // Everything else in the namespace stays authenticated.
+        for p in [
+            "/api/channels/slack/my-bot/config",
+            "/api/channels/slack/my-bot",
+            "/api/channels/slack//events",
+            "/api/channels/slack/my-bot/events/extra",
+            "/api/channels/slack",
+        ] {
+            assert!(!is_public_path(p), "{p} must stay authenticated");
+        }
+    }
+
+    #[cfg(feature = "slack")]
+    #[test]
+    fn slack_callback_helper_is_available_without_web_ui() {
+        assert!(is_slack_callback_path("/api/channels/slack/account/events"));
+        assert!(!is_slack_callback_path(
+            "/api/channels/slack/account/events/extra"
+        ));
+    }
+
+    #[cfg(all(feature = "slack", feature = "web-ui"))]
+    #[tokio::test]
+    async fn composed_router_bypasses_auth_only_for_hmac_verified_slack_callbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use {
+            axum::{
+                Router,
+                body::Bytes,
+                extract::{Path, State},
+                http::Request,
+                middleware::{Next, from_fn},
+                response::IntoResponse,
+                routing::post,
+            },
+            moltis_channels::ChannelWebhookVerifier as _,
+            moltis_gateway::channel_webhook_dedup::ChannelWebhookDedupeStore,
+            moltis_slack::channel_webhook_verifier::SlackChannelWebhookVerifier,
+            secrecy::Secret,
+            std::sync::RwLock,
+        };
+
+        type CallbackState = Arc<RwLock<ChannelWebhookDedupeStore>>;
+
+        async fn callback(
+            State(dedup): State<CallbackState>,
+            Path((account_id, endpoint)): Path<(String, String)>,
+            headers: HeaderMap,
+            body: Bytes,
+        ) -> axum::response::Response {
+            let verifier = SlackChannelWebhookVerifier::new(Secret::new(
+                "test_signing_secret_123".to_string(),
+            ));
+            let verified = match verifier.verify(&headers, &body) {
+                Ok(verified) => verified,
+                Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+            };
+            let duplicate = verified.idempotency_key.as_deref().is_some_and(|key| {
+                dedup
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .check_and_insert_scoped("slack", &account_id, &endpoint, key)
+            });
+            if duplicate {
+                return Json(serde_json::json!({ "deduplicated": true })).into_response();
+            }
+            let challenge = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value["challenge"].as_str().map(ToOwned::to_owned));
+            match challenge {
+                Some(challenge) => {
+                    Json(serde_json::json!({ "challenge": challenge })).into_response()
+                },
+                None => Json(serde_json::json!({ "deduplicated": false })).into_response(),
+            }
+        }
+
+        async fn test_auth(
+            request: Request<axum::body::Body>,
+            next: Next,
+        ) -> axum::response::Response {
+            if is_public_path(request.uri().path()) {
+                next.run(request).await
+            } else {
+                StatusCode::UNAUTHORIZED.into_response()
+            }
+        }
+
+        let app = Router::new()
+            .route(
+                "/api/channels/slack/{account_id}/{endpoint}",
+                post(callback),
+            )
+            .layer(from_fn(test_auth))
+            .with_state(Arc::new(RwLock::new(ChannelWebhookDedupeStore::new())));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = reqwest::Client::new();
+        let body = r#"{"type":"url_verification","challenge":"route-ok"}"#;
+        let callback_url = format!("http://{addr}/api/channels/slack/account/events");
+
+        let signed = client
+            .post(&callback_url)
+            .header("x-slack-request-timestamp", "1700000000")
+            .header(
+                "x-slack-signature",
+                "v0=f2ff105195f235457c3d150889fb4f7743c7ee1e21de2fb7e68ae000efc0ca73",
+            )
+            .body(body)
+            .send()
+            .await?;
+        assert_eq!(signed.status(), StatusCode::OK);
+        assert_eq!(
+            signed.json::<serde_json::Value>().await?["challenge"],
+            "route-ok"
+        );
+
+        let unsigned = client.post(&callback_url).body(body).send().await?;
+        assert_eq!(unsigned.status(), StatusCode::UNAUTHORIZED);
+
+        for (endpoint, body, signature, duplicate) in [
+            (
+                "commands",
+                "command=%2Fmoltis&trigger_id=route-trigger&text=hello\n",
+                "v0=ba1da8a2c1281bfc9e48a97c750a7f9906303fd4824237e9870094fdd0ff71c3",
+                false,
+            ),
+            (
+                "interactions",
+                "payload=%7B%22type%22%3A%22block_actions%22%2C%22trigger_id%22%3A%22route-trigger%22%7D\n",
+                "v0=007a942d6e04a0f1eecdd87b8f101a1a6505668b8e38cf35b3e1cfc344b8e424",
+                false,
+            ),
+            (
+                "commands",
+                "command=%2Fmoltis&trigger_id=route-trigger&text=hello\n",
+                "v0=ba1da8a2c1281bfc9e48a97c750a7f9906303fd4824237e9870094fdd0ff71c3",
+                true,
+            ),
+        ] {
+            let response = client
+                .post(format!(
+                    "http://{addr}/api/channels/slack/account/{endpoint}"
+                ))
+                .header("x-slack-request-timestamp", "1700000000")
+                .header("x-slack-signature", signature)
+                .body(body)
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.json::<serde_json::Value>().await?["deduplicated"],
+                duplicate,
+                "{endpoint}"
+            );
+        }
+
+        for path in [
+            "/api/channels/slack/account/config",
+            "/api/channels/slack/account/events/extra",
+        ] {
+            let response = client.post(format!("http://{addr}{path}")).send().await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+
+        server.abort();
+        Ok(())
+    }
     use {super::*, sqlx::SqlitePool};
 
     #[test]
@@ -469,6 +755,12 @@ mod tests {
     #[test]
     fn public_identity_path_is_public() {
         assert!(is_public_path("/api/public/identity"));
+    }
+
+    #[cfg(feature = "web-ui")]
+    #[test]
+    fn offline_fallback_is_public() {
+        assert!(is_public_path("/offline.html"));
     }
 
     #[tokio::test]

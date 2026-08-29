@@ -22,6 +22,7 @@ use {
 };
 
 use crate::{
+    runtimes::env::inject_managed_files_dir,
     transport::{ExternalAgentSession, ExternalAgentTransport},
     types::{
         AcpPermissionHandler, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
@@ -29,6 +30,9 @@ use crate::{
         ExternalAgentStatus,
     },
 };
+
+const MAX_ACP_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_INFLIGHT_ACP_MESSAGES: usize = 256;
 
 /// Transport for ACP (Agent Client Protocol) agents over JSON-RPC stdio.
 pub struct AcpTransport {
@@ -301,6 +305,7 @@ impl acp::Client for AcpClient {
             command.current_dir(cwd);
         }
         command.envs(args.env.iter().map(|env| (&env.name, &env.value)));
+        inject_managed_files_dir(&mut command);
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -577,6 +582,7 @@ async fn run_acp_controller(
             command.current_dir(working_dir);
         }
         command.envs(&spec.env);
+        inject_managed_files_dir(&mut command);
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -601,10 +607,15 @@ async fn run_acp_controller(
             tokio::task::spawn_local(forward_stderr(stderr, Arc::clone(&client)));
         }
 
-        let (conn, io_task) = acp::ClientSideConnection::new(
+        let (conn, io_task) = acp::ClientSideConnection::new_with_limits(
             Arc::clone(&client),
             stdin.compat_write(),
             stdout.compat(),
+            acp::ConnectionLimits::bounded(
+                MAX_ACP_FRAME_BYTES,
+                MAX_ACP_FRAME_BYTES,
+                MAX_INFLIGHT_ACP_MESSAGES,
+            ),
             |future| {
                 tokio::task::spawn_local(future);
             },

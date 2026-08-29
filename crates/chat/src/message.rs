@@ -278,8 +278,7 @@ pub(crate) fn user_audio_path_from_params(params: &Value, session_key: &str) -> 
         return None;
     }
 
-    let key = SessionStore::key_to_filename(session_key);
-    Some(format!("media/{key}/{filename}"))
+    SessionStore::media_reference(session_key, filename).ok()
 }
 
 pub(crate) fn user_documents_from_params(
@@ -288,7 +287,6 @@ pub(crate) fn user_documents_from_params(
     session_store: &SessionStore,
 ) -> Option<Vec<UserDocument>> {
     let documents = params.get("_document_files")?.as_array()?;
-    let media_dir_key = SessionStore::key_to_filename(session_key);
     let mut parsed = Vec::new();
 
     for document in documents {
@@ -304,18 +302,19 @@ pub(crate) fn user_documents_from_params(
 
         let display_name = sanitize_user_document_display_name(&document.display_name)
             .unwrap_or_else(|| stored_filename.to_string());
+        let Ok(media_ref) = SessionStore::media_reference(session_key, stored_filename) else {
+            continue;
+        };
+        let Ok(absolute_path) = session_store.media_path_for(session_key, stored_filename) else {
+            continue;
+        };
         parsed.push(UserDocument {
             display_name,
             stored_filename: stored_filename.to_string(),
             mime_type: mime_type.to_string(),
             size_bytes: document.size_bytes,
-            media_ref: format!("media/{media_dir_key}/{stored_filename}"),
-            absolute_path: Some(
-                session_store
-                    .media_path_for(session_key, stored_filename)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
+            media_ref,
+            absolute_path: Some(absolute_path.to_string_lossy().to_string()),
         });
     }
 
@@ -343,4 +342,59 @@ pub(crate) fn user_documents_for_persistence(
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn inbound_document_metadata_resolves_to_the_persisted_local_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(temp.path().to_path_buf());
+        let session_key = "channel:whatsapp:test";
+        let filename = "0123456789abcdef0123456789abcdef_document.pdf";
+        store
+            .save_media(session_key, filename, b"synthetic test document")
+            .await
+            .unwrap();
+        let params = serde_json::json!({
+            "_document_files": [{
+                "display_name": "test document.pdf",
+                "stored_filename": filename,
+                "mime_type": "application/pdf",
+                "size_bytes": 23,
+            }]
+        });
+
+        let documents = user_documents_from_params(&params, session_key, &store).unwrap();
+        let local_path = documents[0].absolute_path.as_deref().unwrap();
+        let context = format_user_documents_context(&documents).unwrap();
+
+        assert_eq!(
+            std::fs::read(local_path).unwrap(),
+            b"synthetic test document"
+        );
+        assert!(context.contains(&format!("local_path: {local_path}")));
+        assert_eq!(
+            documents[0].media_ref,
+            SessionStore::media_reference(session_key, filename).unwrap()
+        );
+    }
+
+    #[test]
+    fn inbound_document_metadata_rejects_path_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(temp.path().to_path_buf());
+        let params = serde_json::json!({
+            "_document_files": [{
+                "display_name": "test document.pdf",
+                "stored_filename": "../outside.pdf",
+                "mime_type": "application/pdf",
+            }]
+        });
+
+        assert!(user_documents_from_params(&params, "channel:whatsapp:test", &store).is_none());
+    }
 }

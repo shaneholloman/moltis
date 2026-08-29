@@ -7,8 +7,10 @@
 
 pub mod api;
 pub mod assets;
+mod container_management;
 pub mod error;
 pub mod gon;
+mod image_input;
 pub mod oauth;
 pub mod share;
 pub mod share_render;
@@ -53,6 +55,7 @@ pub fn web_routes() -> Router<AppState> {
         .route("/assets/{*path}", get(assets::asset_handler))
         .route("/manifest.json", get(assets::manifest_handler))
         .route("/sw.js", get(assets::service_worker_handler))
+        .route("/offline.html", get(assets::offline_handler))
         .merge(api)
         .fallback(spa::spa_fallback)
 }
@@ -220,6 +223,7 @@ fn build_api_routes() -> Router<AppState> {
             get(api::api_session_media_handler),
         )
         .route("/api/logs/download", get(api::api_logs_download_handler))
+        .nest("/api/files", moltis_httpd::files_routes::files_router())
         .nest("/api/data", moltis_httpd::data_routes::data_router());
 
     // Add metrics API routes (protected).

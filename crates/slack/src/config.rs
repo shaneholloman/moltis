@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use {
     moltis_channels::{
-        config_view::ChannelConfigView,
+        config_view::{ChannelConfigView, UntrustedAudience, UntrustedTools},
         gating::{DmPolicy, GroupPolicy, MentionMode},
     },
     moltis_common::secret_serde,
@@ -95,9 +95,24 @@ pub struct SlackAccountConfig {
     #[serde(default)]
     pub allowlist: Vec<String>,
 
+    /// Exact sender IDs allowed to run privileged channel commands.
+    /// Empty grants nobody privileged access.
+    #[serde(default)]
+    pub operators: Vec<String>,
+
     /// Channel allowlist (Slack channel IDs).
     #[serde(default)]
     pub channel_allowlist: Vec<String>,
+
+    /// Tool audience ceiling for turns outside an operator direct chat
+    /// (default: `public`).
+    #[serde(default)]
+    pub untrusted_audience: UntrustedAudience,
+
+    /// Name policy for turns outside an operator direct chat
+    /// (default: `deny_all`).
+    #[serde(default)]
+    pub untrusted_tools: UntrustedTools,
 
     /// Default model for this account.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +135,27 @@ pub struct SlackAccountConfig {
     /// Reply in threads (default: true).
     pub thread_replies: bool,
 
+    /// Render replies as Block Kit blocks (headings, dividers, code, sections)
+    /// instead of a single flat mrkdwn message. Falls back to plain text when
+    /// content cannot be represented within Slack's limits. Default: false.
+    pub rich_blocks: bool,
+
+    /// Acknowledge inbound messages with emoji reactions (👀 on receipt, ✅ on
+    /// success, ❌ on error). Only applied when the bot is directly addressed
+    /// (DM or @mention). Default: true.
+    pub ack_reactions: bool,
+
+    /// Route inbound emoji reactions from users into the agent as messages
+    /// (e.g. "react ✅ to approve"). The bot's own acknowledgment reactions are
+    /// always ignored. Default: false.
+    pub reaction_triggers: bool,
+
+    /// When `reaction_triggers` is enabled, only these emoji (shortcodes, no
+    /// colons — e.g. `white_check_mark`) trigger the agent. Empty means any
+    /// emoji triggers. Default: empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reaction_trigger_emojis: Vec<String>,
+
     /// Per-channel model/provider overrides (channel_id -> override).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub channel_overrides: HashMap<String, ChannelOverride>,
@@ -127,6 +163,12 @@ pub struct SlackAccountConfig {
     /// Per-user model/provider overrides (user_id -> override).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub user_overrides: HashMap<String, UserOverride>,
+
+    /// Enable OTP self-approval for non-allowlisted DM users.
+    pub otp_self_approval: bool,
+
+    /// Cooldown in seconds after failed OTP attempts.
+    pub otp_cooldown_secs: u64,
 }
 
 impl std::fmt::Debug for SlackAccountConfig {
@@ -144,15 +186,24 @@ impl std::fmt::Debug for SlackAccountConfig {
             .field("group_policy", &self.group_policy)
             .field("mention_mode", &self.mention_mode)
             .field("allowlist", &self.allowlist)
+            .field("operators", &self.operators)
             .field("channel_allowlist", &self.channel_allowlist)
+            .field("untrusted_audience", &self.untrusted_audience)
+            .field("untrusted_tools", &self.untrusted_tools)
             .field("model", &self.model)
             .field("model_provider", &self.model_provider)
             .field("agent_id", &self.agent_id)
             .field("stream_mode", &self.stream_mode)
             .field("edit_throttle_ms", &self.edit_throttle_ms)
             .field("thread_replies", &self.thread_replies)
+            .field("rich_blocks", &self.rich_blocks)
+            .field("ack_reactions", &self.ack_reactions)
+            .field("reaction_triggers", &self.reaction_triggers)
+            .field("reaction_trigger_emojis", &self.reaction_trigger_emojis)
             .field("channel_overrides", &self.channel_overrides)
             .field("user_overrides", &self.user_overrides)
+            .field("otp_self_approval", &self.otp_self_approval)
+            .field("otp_cooldown_secs", &self.otp_cooldown_secs)
             .finish()
     }
 }
@@ -169,15 +220,24 @@ impl Default for SlackAccountConfig {
             group_policy: GroupPolicy::Open,
             mention_mode: MentionMode::Mention,
             allowlist: Vec::new(),
+            operators: Vec::new(),
             channel_allowlist: Vec::new(),
+            untrusted_audience: UntrustedAudience::default(),
+            untrusted_tools: UntrustedTools::default(),
             model: None,
             model_provider: None,
             agent_id: None,
             stream_mode: StreamMode::EditInPlace,
             edit_throttle_ms: 500,
             thread_replies: true,
+            rich_blocks: false,
+            ack_reactions: true,
+            reaction_triggers: false,
+            reaction_trigger_emojis: Vec::new(),
             channel_overrides: HashMap::new(),
             user_overrides: HashMap::new(),
+            otp_self_approval: true,
+            otp_cooldown_secs: 300,
         }
     }
 }
@@ -187,8 +247,20 @@ impl ChannelConfigView for SlackAccountConfig {
         &self.allowlist
     }
 
+    fn operators(&self) -> &[String] {
+        &self.operators
+    }
+
     fn group_allowlist(&self) -> &[String] {
         &self.channel_allowlist
+    }
+
+    fn untrusted_audience(&self) -> UntrustedAudience {
+        self.untrusted_audience
+    }
+
+    fn untrusted_tools(&self) -> UntrustedTools {
+        self.untrusted_tools
     }
 
     fn dm_policy(&self) -> DmPolicy {
@@ -242,8 +314,9 @@ pub struct RedactedConfig<'a>(pub &'a SlackAccountConfig);
 impl Serialize for RedactedConfig<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let c = self.0;
-        let mut count = 12; // always-present fields
+        let mut count = 20; // always-present fields
         count += c.signing_secret.is_some() as usize;
+        count += !c.reaction_trigger_emojis.is_empty() as usize;
         count += c.model.is_some() as usize;
         count += c.model_provider.is_some() as usize;
         count += c.agent_id.is_some() as usize;
@@ -261,7 +334,10 @@ impl Serialize for RedactedConfig<'_> {
         s.serialize_field("group_policy", &c.group_policy)?;
         s.serialize_field("mention_mode", &c.mention_mode)?;
         s.serialize_field("allowlist", &c.allowlist)?;
+        s.serialize_field("operators", &c.operators)?;
         s.serialize_field("channel_allowlist", &c.channel_allowlist)?;
+        s.serialize_field("untrusted_audience", &c.untrusted_audience)?;
+        s.serialize_field("untrusted_tools", &c.untrusted_tools)?;
         if c.model.is_some() {
             s.serialize_field("model", &c.model)?;
         }
@@ -274,12 +350,20 @@ impl Serialize for RedactedConfig<'_> {
         s.serialize_field("stream_mode", &c.stream_mode)?;
         s.serialize_field("edit_throttle_ms", &c.edit_throttle_ms)?;
         s.serialize_field("thread_replies", &c.thread_replies)?;
+        s.serialize_field("rich_blocks", &c.rich_blocks)?;
+        s.serialize_field("ack_reactions", &c.ack_reactions)?;
+        s.serialize_field("reaction_triggers", &c.reaction_triggers)?;
+        if !c.reaction_trigger_emojis.is_empty() {
+            s.serialize_field("reaction_trigger_emojis", &c.reaction_trigger_emojis)?;
+        }
         if !c.channel_overrides.is_empty() {
             s.serialize_field("channel_overrides", &c.channel_overrides)?;
         }
         if !c.user_overrides.is_empty() {
             s.serialize_field("user_overrides", &c.user_overrides)?;
         }
+        s.serialize_field("otp_self_approval", &c.otp_self_approval)?;
+        s.serialize_field("otp_cooldown_secs", &c.otp_cooldown_secs)?;
         s.end()
     }
 }
@@ -305,6 +389,8 @@ mod tests {
         assert!(cfg.group_allowlist().is_empty());
         assert_eq!(cfg.dm_policy(), DmPolicy::Allowlist);
         assert_eq!(cfg.group_policy(), GroupPolicy::Open);
+        assert_eq!(cfg.untrusted_audience(), UntrustedAudience::Public);
+        assert_eq!(cfg.untrusted_tools(), UntrustedTools::DenyAll);
         assert!(cfg.model().is_none());
         assert!(cfg.model_provider().is_none());
     }
@@ -387,10 +473,71 @@ mod tests {
         assert_eq!(cfg.stream_mode, StreamMode::EditInPlace);
         assert_eq!(cfg.edit_throttle_ms, 500);
         assert!(cfg.thread_replies);
+        assert!(cfg.ack_reactions);
+        assert!(!cfg.rich_blocks);
+        assert!(cfg.otp_self_approval);
+        assert_eq!(cfg.otp_cooldown_secs, 300);
         assert_eq!(cfg.mention_mode, MentionMode::Mention);
         assert_eq!(cfg.api_base_url, DEFAULT_SLACK_API_BASE_URL);
         assert!(cfg.channel_overrides.is_empty());
         assert!(cfg.user_overrides.is_empty());
+    }
+
+    #[test]
+    fn ack_reactions_round_trip_and_redaction() {
+        // Defaults to true when absent.
+        let cfg: SlackAccountConfig = serde_json::from_value(serde_json::json!({
+            "bot_token": "xoxb-test",
+            "app_token": "xapp-test",
+        }))
+        .unwrap();
+        assert!(cfg.ack_reactions);
+
+        // Explicit false round-trips through the redacted view.
+        let cfg: SlackAccountConfig = serde_json::from_value(serde_json::json!({
+            "bot_token": "xoxb-test",
+            "app_token": "xapp-test",
+            "ack_reactions": false,
+        }))
+        .unwrap();
+        assert!(!cfg.ack_reactions);
+        let redacted = serde_json::to_value(RedactedConfig(&cfg)).unwrap();
+        assert_eq!(redacted["ack_reactions"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn untrusted_tool_ceiling_round_trips_and_redacts() {
+        let cfg: SlackAccountConfig = serde_json::from_value(serde_json::json!({
+            "bot_token": "xoxb-test",
+            "app_token": "xapp-test",
+            "untrusted_audience": "trusted",
+            "untrusted_tools": "policy",
+        }))
+        .unwrap();
+
+        assert_eq!(cfg.untrusted_audience(), UntrustedAudience::Trusted);
+        assert_eq!(cfg.untrusted_tools(), UntrustedTools::Policy);
+
+        let stored = serde_json::to_value(&cfg).unwrap();
+        let round_tripped: SlackAccountConfig = serde_json::from_value(stored).unwrap();
+        assert_eq!(
+            round_tripped.untrusted_audience(),
+            UntrustedAudience::Trusted
+        );
+        assert_eq!(round_tripped.untrusted_tools(), UntrustedTools::Policy);
+
+        let redacted = serde_json::to_value(RedactedConfig(&round_tripped)).unwrap();
+        assert_eq!(redacted["untrusted_audience"], "trusted");
+        assert_eq!(redacted["untrusted_tools"], "policy");
+    }
+
+    #[test]
+    fn invalid_untrusted_tool_ceiling_is_rejected() {
+        let invalid_audience = serde_json::json!({ "untrusted_audience": "everyone" });
+        assert!(serde_json::from_value::<SlackAccountConfig>(invalid_audience).is_err());
+
+        let invalid_tools = serde_json::json!({ "untrusted_tools": "allow_all" });
+        assert!(serde_json::from_value::<SlackAccountConfig>(invalid_tools).is_err());
     }
 
     #[test]
@@ -441,6 +588,24 @@ mod tests {
         assert_eq!(storage["bot_token"], "xoxb-secret");
         assert_eq!(storage["app_token"], "xapp-secret");
         assert_eq!(storage["signing_secret"], "sign-secret");
+    }
+
+    #[test]
+    fn otp_fields_round_trip() {
+        let json = serde_json::json!({
+            "bot_token": "xoxb-test",
+            "app_token": "xapp-test",
+            "otp_self_approval": false,
+            "otp_cooldown_secs": 60,
+        });
+        let cfg: SlackAccountConfig = serde_json::from_value(json).unwrap();
+        assert!(!cfg.otp_self_approval);
+        assert_eq!(cfg.otp_cooldown_secs, 60);
+
+        let value = serde_json::to_value(&cfg).unwrap();
+        let cfg2: SlackAccountConfig = serde_json::from_value(value).unwrap();
+        assert!(!cfg2.otp_self_approval);
+        assert_eq!(cfg2.otp_cooldown_secs, 60);
     }
 
     #[test]

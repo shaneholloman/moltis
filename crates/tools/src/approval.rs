@@ -652,10 +652,11 @@ impl ApprovalManager {
     /// Resolve a pending approval request.
     pub async fn resolve(&self, id: &str, decision: ApprovalDecision, command: Option<&str>) {
         if let Some(pending) = self.pending.write().await.remove(id) {
-            if decision == ApprovalDecision::Approved
-                && let Some(cmd) = command
-            {
-                self.approved_commands.write().await.insert(cmd.to_string());
+            if decision == ApprovalDecision::Approved && command.is_some() {
+                self.approved_commands
+                    .write()
+                    .await
+                    .insert(pending.command.clone());
             }
             let _ = pending.tx.send(decision);
             debug!(id, "approval resolved");
@@ -1151,6 +1152,36 @@ EOF\n";
             pending
                 .iter()
                 .all(|request| request.session_key.as_deref() == Some("session:a"))
+        );
+    }
+
+    #[tokio::test]
+    async fn remembered_approval_uses_pending_command_not_caller_value() {
+        let manager = ApprovalManager::default();
+        let (id, _receiver) = manager
+            .create_request("original-command --flag", None)
+            .await;
+        manager
+            .resolve(
+                &id,
+                ApprovalDecision::Approved,
+                Some("different-command --flag"),
+            )
+            .await;
+
+        assert_eq!(
+            manager
+                .check_command("original-command --flag")
+                .await
+                .unwrap(),
+            ApprovalAction::Proceed
+        );
+        assert_eq!(
+            manager
+                .check_command("different-command --flag")
+                .await
+                .unwrap(),
+            ApprovalAction::NeedsApproval
         );
     }
 

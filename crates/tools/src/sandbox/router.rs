@@ -8,6 +8,7 @@ use std::{
 use {
     async_trait::async_trait,
     secrecy::ExposeSecret,
+    sha2::{Digest, Sha256},
     tokio::sync::RwLock,
     tracing::{debug, info, warn},
 };
@@ -907,22 +908,21 @@ impl SandboxRouter {
         self.agent_overrides.write().await.remove(session_key);
     }
 
-    /// Derive a SandboxId for a given session key.
-    /// The key is sanitized for use as a container name (only alphanumeric, dash, underscore, dot).
+    /// Derive a collision-resistant SandboxId for a given session key.
     pub fn sandbox_id_for(&self, session_key: &str) -> SandboxId {
-        let sanitized: String = session_key
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect();
+        let scope: &[u8] = match &self.config.scope {
+            super::types::SandboxScope::Session => b"session",
+            super::types::SandboxScope::Agent => b"agent",
+            super::types::SandboxScope::Shared => b"shared",
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(b"moltis-sandbox-id-v2\0");
+        hasher.update(scope);
+        hasher.update(b"\0");
+        hasher.update(session_key.as_bytes());
         SandboxId {
             scope: self.config.scope.clone(),
-            key: sanitized,
+            key: format!("v2-{:x}", hasher.finalize()),
         }
     }
 

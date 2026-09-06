@@ -1,11 +1,14 @@
 //! WebSocket client that connects to a gateway as a headless node.
 
-use std::{process::Stdio, time::Duration};
+use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use {
     base64::Engine,
     futures::{SinkExt, StreamExt},
-    tokio::process::Command,
+    tokio::{
+        io::{AsyncRead, AsyncReadExt},
+        process::Command,
+    },
     tokio_tungstenite::{connect_async, tungstenite::Message},
     tracing::{debug, error, info, warn},
 };
@@ -15,10 +18,42 @@ use crate::{
     identity::NodeIdentity,
 };
 
-use moltis_protocol::{
-    ClientInfo, ConnectAuth, ConnectParamsV4, GatewayFrame, PROTOCOL_VERSION, ProtocolRange,
-    RequestFrame, ResponseFrame, roles,
+use {
+    moltis_common::process_tree::OwnedProcessTree,
+    moltis_protocol::{
+        ClientInfo, ConnectAuth, ConnectParamsV4, GatewayFrame, PROTOCOL_VERSION, ProtocolRange,
+        RequestFrame, ResponseFrame, SYSTEM_EXEC_COMMAND, SystemExecRequest,
+        is_safe_remote_env_key, roles,
+    },
 };
+
+// Keep the worst-case JSON expansion of both streams below the protocol's
+// payload ceiling (a control byte may serialize as six ASCII bytes).
+const MAX_OUTPUT_BYTES: usize = 32 * 1024;
+
+async fn read_output_limited(mut reader: impl AsyncRead + Unpin) -> std::io::Result<String> {
+    let mut output = Vec::with_capacity(MAX_OUTPUT_BYTES.min(64 * 1024));
+    let mut buffer = [0_u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let keep = read.min(MAX_OUTPUT_BYTES.saturating_sub(output.len()));
+        output.extend_from_slice(&buffer[..keep]);
+        truncated |= keep < read;
+    }
+    let mut output = String::from_utf8_lossy(&output).into_owned();
+    if output.len() > MAX_OUTPUT_BYTES {
+        output.truncate(output.floor_char_boundary(MAX_OUTPUT_BYTES));
+        truncated = true;
+    }
+    if truncated {
+        output.push_str("\n... [output truncated]");
+    }
+    Ok(output)
+}
 
 /// Configuration for connecting a node to a gateway.
 #[derive(Debug)]
@@ -35,14 +70,16 @@ pub struct NodeConfig {
     pub display_name: Option<String>,
     /// Platform string (e.g. "macos", "linux").
     pub platform: String,
-    /// Capabilities this node advertises (e.g. "system.run").
+    /// Capabilities this node advertises (e.g. "system.exec.v1").
     pub caps: Vec<String>,
-    /// Commands this node supports (e.g. "system.run", "system.which").
+    /// Commands this node supports (e.g. "system.exec.v1", "system.which").
     pub commands: Vec<String>,
     /// Maximum time for a single command execution.
     pub exec_timeout: Duration,
     /// Working directory for commands (defaults to $HOME).
     pub working_dir: Option<String>,
+    /// Executable paths or names that this node permits the gateway to run.
+    pub allowed_programs: Vec<String>,
 }
 
 impl Default for NodeConfig {
@@ -55,17 +92,18 @@ impl Default for NodeConfig {
             display_name: None,
             platform: std::env::consts::OS.into(),
             caps: vec![
-                "system.run".into(),
+                SYSTEM_EXEC_COMMAND.into(),
                 "system.which".into(),
                 "system.providers".into(),
             ],
             commands: vec![
-                "system.run".into(),
+                SYSTEM_EXEC_COMMAND.into(),
                 "system.which".into(),
                 "system.providers".into(),
             ],
             exec_timeout: Duration::from_secs(300),
             working_dir: None,
+            allowed_programs: Vec::new(),
         }
     }
 }
@@ -464,7 +502,7 @@ impl NodeHost {
         info!(invoke_id = %invoke_id, command = %command, "handling invoke");
 
         let result = match command {
-            "system.run" => self.handle_system_run(&args).await,
+            SYSTEM_EXEC_COMMAND => self.handle_system_exec(&args).await,
             "system.which" => self.handle_system_which(&args).await,
             "system.providers" => self.handle_system_providers().await,
             other => {
@@ -484,53 +522,64 @@ impl NodeHost {
         }
     }
 
-    async fn handle_system_run(&self, args: &serde_json::Value) -> Result<serde_json::Value> {
-        let command = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::Command("missing 'command' in args".into()))?;
-
-        let timeout_ms = args
-            .get("timeout")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(self.config.exec_timeout.as_millis() as u64);
+    async fn handle_system_exec(&self, args: &serde_json::Value) -> Result<serde_json::Value> {
+        let request: SystemExecRequest = serde_json::from_value(args.clone())
+            .map_err(|error| Error::Command(format!("invalid system.exec.v1 request: {error}")))?;
+        if let Some(argument) = request.args.iter().find(|argument| argument.contains('\0')) {
+            return Err(Error::Command(format!(
+                "process argument contains NUL: {argument:?}"
+            )));
+        }
+        if request.cwd.as_deref().is_some_and(|cwd| cwd.contains('\0'))
+            || request.env.values().any(|value| value.contains('\0'))
+        {
+            return Err(Error::Command(
+                "working directory and environment values must not contain NUL".into(),
+            ));
+        }
+        let program = self.resolve_allowed_program(&request.program)?;
+        let cwd = self.resolve_cwd(request.cwd.as_deref()).await?;
+        let configured_timeout_ms =
+            u64::try_from(self.config.exec_timeout.as_millis()).unwrap_or(u64::MAX);
+        let timeout_ms = request.timeout_ms.min(configured_timeout_ms).max(1);
         let timeout = Duration::from_millis(timeout_ms);
 
-        let cwd = args
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| self.config.working_dir.clone());
+        if let Some(key) = request.env.keys().find(|key| !is_safe_remote_env_key(key)) {
+            return Err(Error::Command(format!(
+                "environment variable '{key}' is not allowed for node execution"
+            )));
+        }
 
-        info!(command = %command, timeout_ms, "system.run");
+        info!(program = %program.display(), timeout_ms, "system.exec.v1");
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command);
+        let mut cmd = Command::new(program);
+        cmd.args(&request.args);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
+        cmd.current_dir(cwd);
+        cmd.env_clear();
+        cmd.envs(request.env);
 
-        if let Some(ref dir) = cwd {
-            cmd.current_dir(dir);
-        }
-
-        // Apply environment from args if provided.
-        if let Some(env_obj) = args.get("env").and_then(|v| v.as_object()) {
-            for (k, v) in env_obj {
-                if let Some(val) = v.as_str() {
-                    cmd.env(k, val);
-                }
-            }
-        }
-
-        let child = cmd.spawn()?;
-        let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+        let mut child = OwnedProcessTree::spawn(cmd)?;
+        let stdout = child
+            .take_stdout()
+            .ok_or_else(|| Error::Command("failed to capture command stdout".into()))?;
+        let stderr = child
+            .take_stderr()
+            .ok_or_else(|| Error::Command("failed to capture command stderr".into()))?;
+        let result = tokio::time::timeout(timeout, async {
+            tokio::try_join!(
+                child.wait(),
+                read_output_limited(stdout),
+                read_output_limited(stderr)
+            )
+        })
+        .await;
 
         match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let exit_code = output.status.code().unwrap_or(-1);
+            Ok(Ok((status, stdout, stderr))) => {
+                let exit_code = status.code().unwrap_or(-1);
 
                 Ok(serde_json::json!({
                     "stdout": stdout,
@@ -539,10 +588,82 @@ impl NodeHost {
                 }))
             },
             Ok(Err(e)) => Err(Error::Command(format!("failed to execute command: {e}"))),
-            Err(_) => Err(Error::Command(format!(
-                "command timed out after {timeout_ms}ms"
-            ))),
+            Err(_) => {
+                child.kill().await?;
+                Err(Error::Command(format!(
+                    "command timed out after {timeout_ms}ms"
+                )))
+            },
         }
+    }
+
+    fn resolve_allowed_program(&self, requested: &str) -> Result<PathBuf> {
+        if requested.is_empty() || requested.contains('\0') {
+            return Err(Error::Command(
+                "program must not be empty or contain NUL".into(),
+            ));
+        }
+
+        let path = which::which(requested).map_err(|error| {
+            Error::Command(format!("cannot resolve program '{requested}': {error}"))
+        })?;
+        let resolved = std::fs::canonicalize(&path).map_err(|error| {
+            Error::Command(format!(
+                "cannot canonicalize program '{}': {error}",
+                path.display()
+            ))
+        })?;
+
+        let allowed = self.config.allowed_programs.iter().any(|program| {
+            which::which(program)
+                .ok()
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                .is_some_and(|path| path == resolved)
+        });
+        if !allowed {
+            return Err(Error::Command(format!(
+                "program '{}' is not allowed by this node",
+                resolved.display()
+            )));
+        }
+
+        Ok(resolved)
+    }
+
+    async fn resolve_cwd(&self, requested: Option<&str>) -> Result<PathBuf> {
+        let root = self
+            .config
+            .working_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(moltis_config::home_dir)
+            .ok_or_else(|| Error::Command("cannot determine node execution root".into()))?;
+        let root = tokio::fs::canonicalize(&root).await.map_err(|error| {
+            Error::Command(format!(
+                "cannot resolve execution root '{}': {error}",
+                root.display()
+            ))
+        })?;
+        let requested = requested.map(PathBuf::from).unwrap_or_else(|| root.clone());
+        let requested = if requested.is_absolute() {
+            requested
+        } else {
+            root.join(requested)
+        };
+        let cwd = tokio::fs::canonicalize(&requested).await.map_err(|error| {
+            Error::Command(format!(
+                "cannot resolve working directory '{}': {error}",
+                requested.display()
+            ))
+        })?;
+        if !cwd.starts_with(&root) {
+            return Err(Error::Command(format!(
+                "working directory '{}' is outside execution root '{}'",
+                cwd.display(),
+                root.display()
+            )));
+        }
+        Ok(cwd)
     }
 
     async fn handle_system_which(&self, args: &serde_json::Value) -> Result<serde_json::Value> {
@@ -686,16 +807,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_has_system_run_cap() {
+    fn default_config_has_structured_exec_cap() {
         let config = NodeConfig::default();
-        assert!(config.caps.contains(&"system.run".to_string()));
-        assert!(config.commands.contains(&"system.run".to_string()));
+        assert!(config.caps.contains(&SYSTEM_EXEC_COMMAND.to_string()));
+        assert!(config.commands.contains(&SYSTEM_EXEC_COMMAND.to_string()));
     }
 
     #[test]
     fn default_config_platform_is_current_os() {
         let config = NodeConfig::default();
         assert_eq!(config.platform, std::env::consts::OS);
+    }
+
+    #[tokio::test]
+    async fn command_output_is_bounded() {
+        let input = vec![b'x'; MAX_OUTPUT_BYTES + 1024];
+        let output = read_output_limited(input.as_slice()).await.unwrap();
+        assert!(output.ends_with("... [output truncated]"));
+        assert!(output.len() <= MAX_OUTPUT_BYTES + 24);
+    }
+
+    #[test]
+    fn worst_case_output_fits_protocol_payload() {
+        let stream = "\0".repeat(MAX_OUTPUT_BYTES);
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "stdout": stream,
+            "stderr": stream,
+            "exitCode": 0,
+        }))
+        .unwrap();
+        assert!(payload.len() < moltis_protocol::MAX_PAYLOAD_BYTES);
     }
 
     #[tokio::test]
@@ -718,28 +859,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_run_echo() {
-        let config = NodeConfig::default();
+    async fn system_exec_preserves_metacharacter_argument_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let printf = which::which("printf").unwrap();
+        let config = NodeConfig {
+            working_dir: Some(temp.path().to_string_lossy().into_owned()),
+            allowed_programs: vec![printf.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
         let host = NodeHost::new(config);
-        let args = serde_json::json!({
-            "command": "echo hello",
-            "timeout": 5000,
-        });
-        let result = host.handle_system_run(&args).await.unwrap();
-        assert_eq!(result["stdout"].as_str().unwrap().trim(), "hello");
+        let literal = "a b; touch sentinel && $(id) | * > output";
+        let args = serde_json::to_value(SystemExecRequest {
+            program: printf.to_string_lossy().into_owned(),
+            args: vec!["%s".into(), literal.into()],
+            cwd: None,
+            env: std::collections::HashMap::new(),
+            timeout_ms: 5000,
+        })
+        .unwrap();
+
+        let result = host.handle_system_exec(&args).await.unwrap();
+        assert_eq!(result["stdout"], literal);
         assert_eq!(result["exitCode"], 0);
+        assert!(!temp.path().join("sentinel").exists());
+        assert!(!temp.path().join("output").exists());
     }
 
     #[tokio::test]
-    async fn system_run_captures_stderr() {
-        let config = NodeConfig::default();
+    async fn system_exec_rejects_dangerous_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let printf = which::which("printf").unwrap();
+        let config = NodeConfig {
+            working_dir: Some(temp.path().to_string_lossy().into_owned()),
+            allowed_programs: vec![printf.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
         let host = NodeHost::new(config);
         let args = serde_json::json!({
-            "command": "echo err >&2",
-            "timeout": 5000,
+            "program": printf,
+            "args": ["hello"],
+            "env": { "LD_PRELOAD": "/tmp/evil.so" },
+            "timeoutMs": 5000,
         });
-        let result = host.handle_system_run(&args).await.unwrap();
-        assert_eq!(result["stderr"].as_str().unwrap().trim(), "err");
+        let error = host.handle_system_exec(&args).await.unwrap_err();
+        assert!(error.to_string().contains("LD_PRELOAD"));
+    }
+
+    #[tokio::test]
+    async fn system_exec_rejects_program_outside_allowlist() {
+        let temp = tempfile::tempdir().unwrap();
+        let printf = which::which("printf").unwrap();
+        let config = NodeConfig {
+            working_dir: Some(temp.path().to_string_lossy().into_owned()),
+            allowed_programs: Vec::new(),
+            ..Default::default()
+        };
+        let host = NodeHost::new(config);
+        let args = serde_json::json!({
+            "program": printf,
+            "args": ["hello"],
+            "timeoutMs": 5000,
+        });
+
+        let error = host.handle_system_exec(&args).await.unwrap_err();
+        assert!(error.to_string().contains("not allowed by this node"));
     }
 
     /// Regression test for #744: `connect_async("wss://...")` panicked on
@@ -764,14 +947,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_run_exit_code() {
-        let config = NodeConfig::default();
+    async fn system_exec_rejects_cwd_outside_execution_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let printf = which::which("printf").unwrap();
+        let config = NodeConfig {
+            working_dir: Some(root.path().to_string_lossy().into_owned()),
+            allowed_programs: vec![printf.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
         let host = NodeHost::new(config);
-        let args = serde_json::json!({
-            "command": "exit 42",
-            "timeout": 5000,
-        });
-        let result = host.handle_system_run(&args).await.unwrap();
-        assert_eq!(result["exitCode"], 42);
+        let args = serde_json::to_value(SystemExecRequest {
+            program: printf.to_string_lossy().into_owned(),
+            args: vec!["hello".into()],
+            cwd: Some(outside.path().to_string_lossy().into_owned()),
+            env: std::collections::HashMap::new(),
+            timeout_ms: 5000,
+        })
+        .unwrap();
+
+        let error = host.handle_system_exec(&args).await.unwrap_err();
+        assert!(error.to_string().contains("outside execution root"));
     }
 }

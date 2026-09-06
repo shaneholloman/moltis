@@ -69,7 +69,7 @@ pub trait EnvVarProvider: Send + Sync {
 /// `node_exec::exec_on_node` (in gateway) without a direct dependency.
 #[async_trait]
 pub trait NodeExecProvider: Send + Sync {
-    /// Execute a shell command on a remote node.
+    /// Execute a command on a remote node using its structured process protocol.
     async fn exec_on_node(
         &self,
         node_id: &str,
@@ -350,6 +350,41 @@ impl ExecTool {
             .is_some_and(|p| p.has_connected_nodes())
     }
 
+    async fn require_approval(&self, command: &str, session_key: Option<&str>) -> Result<()> {
+        let Some(manager) = &self.approval_manager else {
+            return Ok(());
+        };
+        if manager.check_command(command).await? != ApprovalAction::NeedsApproval {
+            return Ok(());
+        }
+
+        info!(
+            command_bytes = command.len(),
+            "command needs approval, waiting..."
+        );
+        let (request_id, receiver) = manager.create_request(command, session_key).await;
+        if let Some(broadcaster) = &self.broadcaster
+            && let Err(error) = broadcaster
+                .broadcast_request(&request_id, command, session_key)
+                .await
+        {
+            warn!(%error, "failed to broadcast approval request");
+        }
+
+        match manager.wait_for_decision(receiver).await {
+            ApprovalDecision::Approved => {
+                info!(command_bytes = command.len(), "command approved");
+                Ok(())
+            },
+            ApprovalDecision::Denied => {
+                Err(Error::message(format!("command denied by user: {command}")))
+            },
+            ApprovalDecision::Timeout => Err(Error::message(format!(
+                "approval timed out for command: {command}"
+            ))),
+        }
+    }
+
     /// Clean up sandbox resources. Call on session end.
     pub async fn cleanup(&self) -> Result<()> {
         if let Some(ref id) = self.sandbox_id {
@@ -367,7 +402,7 @@ impl AgentTool for ExecTool {
 
     fn description(&self) -> &str {
         if self.has_connected_nodes() {
-            "Execute a shell command on the server or a remote node. Returns stdout, stderr, and exit code."
+            "Execute a shell command on the server or a structured process command on a remote node. Returns stdout, stderr, and exit code."
         } else {
             "Execute a shell command on the server. Returns stdout, stderr, and exit code."
         }
@@ -396,7 +431,7 @@ impl AgentTool for ExecTool {
             obj.insert(
                 "node".to_string(),
                 serde_json::json!({
-                    "type": "string",
+                    "type": ["string", "null"],
                     "description": "Node name or ID to run on. Omit to use the session's default node."
                 }),
             );
@@ -436,18 +471,21 @@ impl AgentTool for ExecTool {
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
             .map(String::from);
+        let clear_default_node = params.get("node").is_some_and(serde_json::Value::is_null);
         // Determine the effective node reference, distinguishing model-supplied
         // values from the admin-configured default.  When no nodes are connected:
         // - Model-hallucinated values are silently dropped (fall through to local).
         // - A configured `default_node` produces a clear error so the admin knows
         //   the intended remote host is unavailable.
         let node_ref = if let Some(provider) = &self.node_provider {
-            if provider.has_connected_nodes() {
+            if clear_default_node {
+                None
+            } else if provider.has_connected_nodes() {
                 match model_node.or_else(|| self.default_node.clone()) {
                     Some(node_ref) => Some(node_ref),
                     None => provider.default_node_ref().await,
                 }
-            } else if let Some(ref dn) = self.default_node {
+            } else if !clear_default_node && let Some(ref dn) = self.default_node {
                 return Err(Error::message(format!(
                     "default node '{dn}' is configured but no nodes are currently connected"
                 ))
@@ -467,6 +505,9 @@ impl AgentTool for ExecTool {
             })?;
 
             let cwd = params.get("working_dir").and_then(|v| v.as_str());
+            let session_key = params.get("_session_key").and_then(|v| v.as_str());
+
+            self.require_approval(command, session_key).await?;
 
             info!(
                 command_bytes = command.len(),
@@ -620,40 +661,8 @@ impl AgentTool for ExecTool {
         // for approval purposes.  Only fully-isolated backends (container, WASM)
         // skip approval gating.
         let needs_approval = !is_sandboxed || !has_container_backend;
-        if needs_approval && let Some(ref mgr) = self.approval_manager {
-            let action = mgr.check_command(command).await?;
-            if action == ApprovalAction::NeedsApproval {
-                info!(
-                    command_bytes = command.len(),
-                    "command needs approval, waiting..."
-                );
-                let (req_id, rx) = mgr.create_request(command, session_key).await;
-
-                // Broadcast to connected clients.
-                if let Some(ref bc) = self.broadcaster
-                    && let Err(e) = bc.broadcast_request(&req_id, command, session_key).await
-                {
-                    warn!(error = %e, "failed to broadcast approval request");
-                }
-
-                let decision = mgr.wait_for_decision(rx).await;
-                match decision {
-                    ApprovalDecision::Approved => {
-                        info!(command_bytes = command.len(), "command approved");
-                    },
-                    ApprovalDecision::Denied => {
-                        return Err(
-                            Error::message(format!("command denied by user: {command}")).into()
-                        );
-                    },
-                    ApprovalDecision::Timeout => {
-                        return Err(Error::message(format!(
-                            "approval timed out for command: {command}"
-                        ))
-                        .into());
-                    },
-                }
-            }
+        if needs_approval {
+            self.require_approval(command, session_key).await?;
         }
 
         let secret_env = if let Some(ref provider) = self.env_provider {

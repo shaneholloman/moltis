@@ -11,6 +11,7 @@ metrics = ["dep:moltis-metrics"]
 base64            = { workspace = true }
 ed25519-dalek     = { workspace = true }
 futures           = { workspace = true }
+moltis-common     = { features = ["process"], workspace = true }
 moltis-config     = { workspace = true }
 moltis-metrics    = { optional = true, workspace = true }
 moltis-protocol   = { workspace = true }

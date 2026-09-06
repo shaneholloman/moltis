@@ -1,8 +1,8 @@
 # Multi-Node
 
 Moltis can distribute work across multiple machines. A **node** is a remote
-device that connects to your gateway and executes commands on your behalf.
-This lets the AI agent run shell commands on a Linux server, query a Raspberry
+device that connects to your gateway and executes approved programs on your behalf.
+This lets the AI agent run commands on a Linux server, query a Raspberry
 Pi, or leverage a GPU machine — all from a single chat session.
 
 ## How It Works
@@ -93,7 +93,22 @@ Options:
 | `--node-id` | Custom node identifier | random UUID |
 | `--working-dir` | Working directory for commands | `$HOME` |
 | `--timeout` | Max command timeout in seconds | `300` |
+| `--allow-program` | Executable path or name allowed for remote execution; repeat for each program | none |
 | `--foreground` | Run in the terminal instead of installing a service | off |
+
+Remote execution is disabled until at least one program is explicitly allowed
+by the node owner. For example:
+
+```bash
+moltis node add \
+  --host ws://your-gateway:9090/ws \
+  --working-dir "$HOME/projects" \
+  --allow-program /bin/ls \
+  --allow-program /usr/bin/printf
+```
+
+The working directory is also the execution root. Requests for directories
+outside that root, including symlink escapes, are rejected.
 
 You can also set `MOLTIS_GATEWAY_URL` as an environment variable instead of
 passing `--host`.
@@ -161,6 +176,12 @@ Once a node is connected, you can target it from a chat session:
   telemetry.
 
 The node assignment is per-session and persists across page reloads.
+
+Commands sent to paired nodes are parsed into an executable and an argument
+array, then invoked directly without a shell. Shell control syntax such as
+redirects, pipelines, command substitution, glob expansion, `&&`, and `;` is
+not interpreted on node hosts. Use a dedicated tool or invoke separate allowed
+programs instead.
 
 ## Node Telemetry
 
@@ -251,10 +272,23 @@ Trust On First Use model as SSH:
 The private key (`~/.moltis/node_key`) is stored with mode 0600. The gateway
 only stores the public key. No shared secret crosses the wire.
 
+Legacy token-authenticated nodes created by older releases must be removed and
+registered again. Current gateways bind the advertised node ID to the
+authenticated device ID and reject mismatches.
+
 ### General
 
 - **Environment filtering**: When the gateway forwards commands to a node, only
   safe environment variables are forwarded (`TERM`, `LANG`, `LC_*`). Secrets
   like API keys, `DYLD_*`, and `LD_PRELOAD` are always blocked.
+- **Executable entrypoint allowlist**: Node owners choose the canonical
+  executable paths that may run. The default allowlist is empty. Do not allow
+  shells, interpreters, package managers, build tools, or programs such as
+  `git` that can launch arbitrary child processes unless you intentionally want
+  to grant that broader execution authority.
+- **No shell interpolation**: Process arguments remain separate from the
+  gateway to the node and are never passed to `sh -c`.
+- **Directory confinement**: Remote working directories must remain beneath
+  the node's configured `--working-dir` execution root.
 - **Key revocation**: Revoke from the Nodes page at any time. The node
   will be disconnected on its next reconnect attempt.

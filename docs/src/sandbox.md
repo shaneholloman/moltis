@@ -363,11 +363,23 @@ home_persistence = "session"   # "off", "session", or "shared" (default)
 ```
 
 - `off`: no home mount, container home is ephemeral
-- `session`: mount a per-session host folder to `/home/sandbox`
+- `session`: mount a per-session host folder to `/home/sandbox`; folder names
+  are opaque, collision-resistant identifiers rather than raw session keys
 - `shared`: mount one shared host folder to `/home/sandbox` for all sessions
   (defaults to `data_dir()/sandbox/home/shared`, or `shared_home_dir` if set)
 
-Moltis stores persisted homes under `data_dir()/sandbox/home/`.
+Moltis stores persisted homes under `data_dir()/sandbox/home/`. Per-session
+folder names are opaque, collision-resistant identifiers; do not derive or
+depend on them directly. The `shared` mode is intentionally visible to every
+sandbox session and is not a session-isolation boundary. Use `session` or `off`
+for credentials or other private state when sessions have different trust
+levels.
+
+After upgrading from a version that used readable session folder names, gateway
+startup discards legacy instance containers. Legacy home folders remain on disk
+but are not automatically reused because multiple session keys may have mapped
+to the same folder. Administrators can inspect and migrate trusted content
+manually.
 
 ## Managed Files mount
 

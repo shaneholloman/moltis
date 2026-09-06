@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use moltis_protocol::{ErrorShape, error_codes};
+use moltis_protocol::{ErrorShape, SystemExecRequest, error_codes, is_safe_remote_env_key};
 
 use crate::{
     auth::{SshAuthMode, SshResolvedTarget, SshTargetEntry},
@@ -8,6 +8,39 @@ use crate::{
 };
 
 use super::MethodRegistry;
+
+fn validate_invoke_args(
+    command: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, ErrorShape> {
+    if command == "system.run" {
+        return Err(ErrorShape::new(
+            error_codes::INVALID_REQUEST,
+            "legacy shell-based system.run is not supported",
+        ));
+    }
+    if command != crate::node_exec::SYSTEM_EXEC_COMMAND {
+        return Ok(args);
+    }
+
+    let mut request: SystemExecRequest = serde_json::from_value(args).map_err(|error| {
+        ErrorShape::new(
+            error_codes::INVALID_REQUEST,
+            format!("invalid structured execution request: {error}"),
+        )
+    })?;
+    if let Some(key) = request.env.keys().find(|key| !is_safe_remote_env_key(key)) {
+        return Err(ErrorShape::new(
+            error_codes::INVALID_REQUEST,
+            format!("environment variable '{key}' is not allowed"),
+        ));
+    }
+    // The direct RPC waits for 30 seconds; leave time to deliver the node's
+    // timeout result instead of abandoning a process that is still running.
+    request.timeout_ms = request.timeout_ms.clamp(1, 28_000);
+    serde_json::to_value(request)
+        .map_err(|error| ErrorShape::new(error_codes::INVALID_REQUEST, error.to_string()))
+}
 
 fn configured_legacy_ssh_target() -> Option<String> {
     let config = moltis_config::discover_and_load();
@@ -378,6 +411,8 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     .cloned()
                     .unwrap_or(serde_json::json!({}));
 
+                let args = validate_invoke_args(&command, args)?;
+
                 // Find the node's conn_id and send the invoke request.
                 let invoke_id = uuid::Uuid::new_v4().to_string();
                 let conn_id = {
@@ -385,6 +420,12 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     let node = inner.nodes.get(&node_id).ok_or_else(|| {
                         ErrorShape::new(error_codes::UNAVAILABLE, "node not connected")
                     })?;
+                    if !node.commands.iter().any(|supported| supported == &command) {
+                        return Err(ErrorShape::new(
+                            error_codes::INVALID_REQUEST,
+                            format!("node does not advertise command '{command}'"),
+                        ));
+                    }
                     node.conn_id.clone()
                 };
 
@@ -401,20 +442,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 let event_json = serde_json::to_string(&invoke_event)
                     .map_err(|e| ErrorShape::new(error_codes::INVALID_REQUEST, e.to_string()))?;
 
-                {
-                    let registry = ctx.state.client_registry.read().await;
-                    let node_client = registry.clients.get(&conn_id).ok_or_else(|| {
-                        ErrorShape::new(error_codes::UNAVAILABLE, "node connection lost")
-                    })?;
-                    if !node_client.send(&event_json) {
-                        return Err(ErrorShape::new(
-                            error_codes::UNAVAILABLE,
-                            "node send failed",
-                        ));
-                    }
-                }
-
-                // Set up a oneshot for the result with a timeout.
+                // Register before sending so an immediate result cannot be lost.
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 {
                     let mut inner = ctx.state.inner.write().await;
@@ -422,9 +450,30 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         .pending_invokes
                         .insert(invoke_id.clone(), crate::state::PendingInvoke {
                             request_id: ctx.request_id.clone(),
+                            expected_conn_id: Some(conn_id.clone()),
                             sender: tx,
                             created_at: std::time::Instant::now(),
                         });
+                }
+
+                let sent = {
+                    let registry = ctx.state.client_registry.read().await;
+                    registry
+                        .clients
+                        .get(&conn_id)
+                        .is_some_and(|node_client| node_client.send(&event_json))
+                };
+                if !sent {
+                    ctx.state
+                        .inner
+                        .write()
+                        .await
+                        .pending_invokes
+                        .remove(&invoke_id);
+                    return Err(ErrorShape::new(
+                        error_codes::UNAVAILABLE,
+                        "node send failed",
+                    ));
                 }
 
                 // Wait for result with 30s timeout.
@@ -469,13 +518,18 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     .cloned()
                     .unwrap_or(serde_json::json!(null));
 
-                let pending = ctx
-                    .state
-                    .inner
-                    .write()
-                    .await
-                    .pending_invokes
-                    .remove(invoke_id);
+                let pending = {
+                    let mut inner = ctx.state.inner.write().await;
+                    if inner.pending_invokes.get(invoke_id).is_some_and(|invoke| {
+                        invoke.expected_conn_id.as_deref() != Some(ctx.client_conn_id.as_str())
+                    }) {
+                        return Err(ErrorShape::new(
+                            error_codes::FORBIDDEN,
+                            "invoke result came from the wrong node connection",
+                        ));
+                    }
+                    inner.pending_invokes.remove(invoke_id)
+                };
                 if let Some(invoke) = pending {
                     let _ = invoke.sender.send(result);
                     Ok(serde_json::json!({}))
@@ -633,4 +687,48 @@ pub(super) fn register(reg: &mut MethodRegistry) {
             })
         }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn invoke_rejects_legacy_shell_payload() {
+        let result = validate_invoke_args(
+            "system.run",
+            serde_json::json!({ "command": "echo ok; touch nope" }),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invoke_rejects_blocked_environment() {
+        let result = validate_invoke_args(
+            crate::node_exec::SYSTEM_EXEC_COMMAND,
+            serde_json::json!({
+                "program": "/usr/bin/printf",
+                "args": ["hello"],
+                "env": { "LD_PRELOAD": "/tmp/evil.so" },
+                "timeoutMs": 1000,
+            }),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invoke_accepts_structured_argument_boundaries() {
+        let value = validate_invoke_args(
+            crate::node_exec::SYSTEM_EXEC_COMMAND,
+            serde_json::json!({
+                "program": "/usr/bin/printf",
+                "args": ["%s", "a; $(id) && touch nope"],
+                "timeoutMs": 1000,
+            }),
+        )
+        .unwrap();
+        assert_eq!(value["args"][1], "a; $(id) && touch nope");
+    }
 }

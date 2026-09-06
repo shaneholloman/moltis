@@ -58,6 +58,9 @@ pub enum NodeAction {
         /// Maximum command timeout in seconds.
         #[arg(long, default_value = "300")]
         timeout: u64,
+        /// Executable path or name allowed for remote execution (repeatable).
+        #[arg(long = "allow-program")]
+        allowed_programs: Vec<String>,
         /// Run in the foreground instead of installing as a service.
         #[arg(long)]
         foreground: bool,
@@ -184,6 +187,7 @@ pub async fn handle_node(action: NodeAction) -> Result<()> {
             node_id,
             working_dir,
             timeout,
+            allowed_programs,
             foreground,
         } => {
             let resolved_node_id = node_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -220,17 +224,18 @@ pub async fn handle_node(action: NodeAction) -> Result<()> {
                     display_name: name,
                     platform: std::env::consts::OS.into(),
                     caps: vec![
-                        "system.run".into(),
+                        moltis_node_host::SYSTEM_EXEC_COMMAND.into(),
                         "system.which".into(),
                         "system.providers".into(),
                     ],
                     commands: vec![
-                        "system.run".into(),
+                        moltis_node_host::SYSTEM_EXEC_COMMAND.into(),
                         "system.which".into(),
                         "system.providers".into(),
                     ],
                     exec_timeout: Duration::from_secs(timeout),
                     working_dir,
+                    allowed_programs,
                 };
 
                 let node = moltis_node_host::NodeHost::new(config);
@@ -245,6 +250,7 @@ pub async fn handle_node(action: NodeAction) -> Result<()> {
                     display_name: name,
                     working_dir,
                     timeout,
+                    allowed_programs,
                 };
 
                 moltis_node_host::service::install(&data_dir, &svc_config)?;
@@ -279,17 +285,18 @@ pub async fn handle_node(action: NodeAction) -> Result<()> {
                 display_name: config.display_name,
                 platform: std::env::consts::OS.into(),
                 caps: vec![
-                    "system.run".into(),
+                    moltis_node_host::SYSTEM_EXEC_COMMAND.into(),
                     "system.which".into(),
                     "system.providers".into(),
                 ],
                 commands: vec![
-                    "system.run".into(),
+                    moltis_node_host::SYSTEM_EXEC_COMMAND.into(),
                     "system.which".into(),
                     "system.providers".into(),
                 ],
                 exec_timeout,
                 working_dir: config.working_dir,
+                allowed_programs: config.allowed_programs,
             };
 
             let node = moltis_node_host::NodeHost::new(node_config);
@@ -371,10 +378,11 @@ pub async fn handle_node(action: NodeAction) -> Result<()> {
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 display_name: config.display_name.clone(),
                 platform: std::env::consts::OS.into(),
-                caps: vec!["system.run".into()],
-                commands: vec!["system.run".into()],
+                caps: vec![moltis_node_host::SYSTEM_EXEC_COMMAND.into()],
+                commands: vec![moltis_node_host::SYSTEM_EXEC_COMMAND.into()],
                 exec_timeout: Duration::from_secs(10),
                 working_dir: None,
+                allowed_programs: Vec::new(),
             };
 
             // Connect with both token and key. The gateway pins the key
@@ -451,13 +459,17 @@ async fn cmd_generate_token(host: &str, api_key: Option<&str>, name: Option<&str
         .get("deviceToken")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("unexpected response: missing deviceToken"))?;
+    let device_id = result
+        .get("deviceId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("unexpected response: missing deviceId"))?;
 
     let ws_url = http_to_ws(host);
 
     println!("Device token: {token}");
     println!();
     println!("Run this on the remote machine:");
-    println!("  moltis node add --host {ws_url} --token {token}");
+    println!("  moltis node add --host {ws_url} --token {token} --node-id {device_id}");
     println!();
     println!("The token is shown once and cannot be retrieved later.");
 

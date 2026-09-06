@@ -499,10 +499,109 @@ fn test_sandbox_router_sandbox_id_for() {
     };
     let router = SandboxRouter::new(config);
     let id = router.sandbox_id_for("session:abc");
-    assert_eq!(id.key, "session-abc");
-    // Plain alphanumeric keys pass through unchanged.
-    let id2 = router.sandbox_id_for("main");
-    assert_eq!(id2.key, "main");
+    let repeated = router.sandbox_id_for("session:abc");
+
+    assert_eq!(id.key, repeated.key);
+    assert_eq!(
+        id.key,
+        "v2-20562047619de23f04775e9dc09eb3070a7bb944d80c2e336b71e2b603dd95d7"
+    );
+    assert!(id.key.starts_with("v2-"));
+    assert_eq!(id.key.len(), 67);
+    assert!(
+        id.key
+            .strip_prefix("v2-")
+            .is_some_and(|digest| digest.chars().all(|ch| ch.is_ascii_hexdigit()))
+    );
+}
+
+#[test]
+fn test_sandbox_router_session_keys_cannot_collide() {
+    let config = SandboxConfig {
+        scope: SandboxScope::Session,
+        home_persistence: HomePersistence::Session,
+        container_prefix: Some("moltis-test-sandbox".into()),
+        ..Default::default()
+    };
+    let router = SandboxRouter::new(config.clone());
+    let victim =
+        router.sandbox_id_for("agent:default:channel:telegram:account:acct1:peer:user:12345");
+    let attacker =
+        router.sandbox_id_for("agent-default-channel-telegram-account-acct1-peer-user-12345");
+
+    assert_ne!(victim.key, attacker.key);
+
+    let docker = DockerSandbox::new(config.clone());
+    assert_ne!(
+        docker.container_name(&victim),
+        docker.container_name(&attacker)
+    );
+
+    assert_ne!(
+        apple_container_name("moltis-test-sandbox", &victim.key, 0),
+        apple_container_name("moltis-test-sandbox", &attacker.key, 0)
+    );
+
+    let victim_home = sandbox_home_persistence_host_dir(&config, None, &victim).unwrap();
+    let attacker_home = sandbox_home_persistence_host_dir(&config, None, &attacker).unwrap();
+    assert_ne!(victim_home, attacker_home);
+    assert_eq!(
+        victim_home.parent(),
+        Some(
+            moltis_config::data_dir()
+                .join("sandbox/home/session")
+                .as_path()
+        )
+    );
+}
+
+#[test]
+fn test_sandbox_router_reserved_path_keys_are_safe() {
+    let router = SandboxRouter::new(SandboxConfig {
+        scope: SandboxScope::Session,
+        ..Default::default()
+    });
+
+    for session_key in ["", ".", "..", "/", "session:abc", "session-abc"] {
+        let id = router.sandbox_id_for(session_key);
+        assert_ne!(id.key, ".");
+        assert_ne!(id.key, "..");
+        assert!(!id.key.is_empty());
+    }
+
+    assert_ne!(
+        router.sandbox_id_for("session:abc").key,
+        router.sandbox_id_for("session-abc").key
+    );
+}
+
+#[test]
+fn test_sandbox_router_scope_is_part_of_identity() {
+    let session_router = SandboxRouter::new(SandboxConfig {
+        scope: SandboxScope::Session,
+        ..Default::default()
+    });
+    let agent_router = SandboxRouter::new(SandboxConfig {
+        scope: SandboxScope::Agent,
+        ..Default::default()
+    });
+    let shared_router = SandboxRouter::new(SandboxConfig {
+        scope: SandboxScope::Shared,
+        ..Default::default()
+    });
+
+    assert_eq!(
+        session_router.sandbox_id_for("session:abc").key,
+        "v2-20562047619de23f04775e9dc09eb3070a7bb944d80c2e336b71e2b603dd95d7"
+    );
+    assert_eq!(
+        agent_router.sandbox_id_for("session:abc").key,
+        "v2-e6a91e10ded6e80f84e1bab8c28c117700c9eef4672ac5632469c77c7a2b7829"
+    );
+    assert_eq!(
+        shared_router.sandbox_id_for("session:abc").key,
+        "v2-655b7035267c8dd21b19326dbcf221ef75d502f246c32fe5c5c522eb427ba2af"
+    );
 }
 
 #[tokio::test]

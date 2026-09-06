@@ -206,6 +206,8 @@ impl ConnectedClient {
 /// A pending RPC invocation waiting for a node to respond.
 pub struct PendingInvoke {
     pub request_id: String,
+    /// Connection allowed to complete this invoke. `None` is used for non-node requests.
+    pub expected_conn_id: Option<String>,
     pub sender: oneshot::Sender<serde_json::Value>,
     pub created_at: Instant,
 }
@@ -439,6 +441,14 @@ pub struct GatewayState {
     /// Set via `MOLTIS_BEHIND_PROXY=true`.  When true, loopback source IPs are
     /// never treated as proof of a direct local connection.
     pub behind_proxy: bool,
+    /// Whether a non-loopback TCP source that already passed every other
+    /// locality check (no proxy headers, loopback `Host`) should still count
+    /// as local. Set via `MOLTIS_TRUST_DOCKER_LOOPBACK=true` for Docker
+    /// deployments that publish the port only to `127.0.0.1` on the host
+    /// (`-p 127.0.0.1:PORT:PORT`): Docker's DNAT rewrites the container-side
+    /// TCP source to a bridge-network address, so it can never look loopback
+    /// from inside the container. See `moltis_auth::locality::is_local_connection`.
+    pub trust_docker_loopback: bool,
     /// Whether TLS is active on the gateway listener.
     pub tls_active: bool,
     /// Whether WebSocket request/response logging is enabled.
@@ -539,6 +549,7 @@ impl GatewayState {
             false,
             false,
             false,
+            false,
             None,
             None,
             Arc::new(moltis_code_index::CodeIndex::config_only(
@@ -567,6 +578,7 @@ impl GatewayState {
         pairing_store: Option<Arc<PairingStore>>,
         localhost_only: bool,
         behind_proxy: bool,
+        trust_docker_loopback: bool,
         tls_active: bool,
         hook_registry: Option<Arc<moltis_common::hooks::HookRegistry>>,
         memory_manager: Option<moltis_memory::runtime::DynMemoryRuntime>,
@@ -602,6 +614,7 @@ impl GatewayState {
             feedback: Arc::default(),
             localhost_only,
             behind_proxy,
+            trust_docker_loopback,
             tls_active,
             ws_request_logs,
             session_event_bus: session_event_bus.unwrap_or_default(),

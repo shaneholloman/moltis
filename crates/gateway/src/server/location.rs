@@ -49,6 +49,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
             let invokes = &mut inner_w.pending_invokes;
             invokes.insert(request_id.clone(), crate::state::PendingInvoke {
                 request_id: request_id.clone(),
+                expected_conn_id: None,
                 sender: tx,
                 created_at: std::time::Instant::now(),
             });
@@ -169,6 +170,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
                 .pending_invokes
                 .insert(pending_key.clone(), crate::state::PendingInvoke {
                     request_id: pending_key.clone(),
+                    expected_conn_id: None,
                     sender: tx,
                     created_at: std::time::Instant::now(),
                 });

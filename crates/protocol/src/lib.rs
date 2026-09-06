@@ -7,5 +7,6 @@
 //! - `ResponseFrame` — gateway → client RPC result (also client → server in v4)
 //! - `EventFrame`    — gateway → client server-push
 
+mod node_exec;
 mod types;
-pub use types::*;
+pub use {node_exec::*, types::*};

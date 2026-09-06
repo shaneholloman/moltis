@@ -19,6 +19,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260902.03] - 2026-09-02
+
+### Security
+- [sandbox] Prevent session keys from sharing sandbox containers and persisted
+  homes. Thanks to [@DavidCarliez](https://github.com/DavidCarliez) for
+  responsibly reporting this issue.
+
+## [20260902.02] - 2026-09-02
+
+### Security
+- [node-host] Replace shell-based remote execution with structured, allowlisted process invocation. Thanks to [@yubrew](https://github.com/yubrew) for responsibly reporting this issue.
+
+## [20260902.01] - 2026-09-02
+### Fixed
+- [providers] Remove unavailable Fireworks model
+
+## [20260901.01] - 2026-09-01
+### Fixed
+- [auth] Let Docker loopback-only deployments count as local (#1249)
+- Fix doctor validation for streamable HTTP MCP servers (#1251)
+
+## [20260831.01] - 2026-08-31
+### Fixed
+- [gateway] Pin Snyk Agent Scan (#1221)
+- [exec] Honor explicit null node selection (#1248)
+
+## [20260830.01] - 2026-08-30
+### Removed
+- [sandbox] Drop DMI sysfs masks on arm64 Docker daemons (#1247)
+
+
+### Fixed
+- [tools] Make object schemas OpenAI-safe (#1232)
+- [web] Validate sandbox image requests (#1222)
+
 ## [20260827.01] - 2026-08-27
 ### Fixed
 - Fix Fastmail MCP OAuth scope registration (#1244)

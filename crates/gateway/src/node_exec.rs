@@ -1,6 +1,6 @@
 //! Route command execution to a remote node or SSH target.
 //!
-//! When `tools.exec.host = "node"`, the gateway forwards shell commands to a
+//! When `tools.exec.host = "node"`, the gateway parses commands into process arguments and forwards them to a
 //! connected headless node via `node.invoke`. When `tools.exec.host = "ssh"`,
 //! it forwards commands through the system `ssh` client using a configured
 //! target alias or `user@host`.
@@ -28,7 +28,12 @@ use crate::{
     state::GatewayState,
 };
 
-use moltis_tools::nodes::{NodeInfo, NodeInfoProvider, NodeProviderInfo};
+use {
+    moltis_protocol::{SystemExecRequest, filter_remote_env},
+    moltis_tools::nodes::{NodeInfo, NodeInfoProvider, NodeProviderInfo},
+};
+
+pub use moltis_protocol::SYSTEM_EXEC_COMMAND;
 
 /// Result of a remote command execution on a node.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -37,30 +42,6 @@ pub struct NodeExecResult {
     pub stderr: String,
     pub exit_code: i32,
 }
-
-/// Environment variables that are safe to forward to a remote node.
-pub const SAFE_ENV_ALLOWLIST: &[&str] = &["TERM", "LANG", "COLORTERM", "NO_COLOR", "FORCE_COLOR"];
-
-/// Environment variable prefixes that are safe to forward.
-pub const SAFE_ENV_PREFIX_ALLOWLIST: &[&str] = &["LC_"];
-
-/// Environment variable patterns that must NEVER be forwarded to a remote node.
-pub const BLOCKED_ENV_PREFIXES: &[&str] = &[
-    "DYLD_",
-    "LD_",
-    "NODE_OPTIONS",
-    "PYTHON",
-    "PERL",
-    "RUBYOPT",
-    "SHELLOPTS",
-    "PS4",
-    "MOLTIS_",
-    "OPENAI_",
-    "ANTHROPIC_",
-    "AWS_",
-    "GOOGLE_",
-    "AZURE_",
-];
 
 /// SSH node ID prefix.
 pub const SSH_ID_PREFIX: &str = "ssh:";
@@ -81,36 +62,15 @@ pub fn ssh_target_matches(node_ref: &str, target: &str) -> bool {
 }
 
 pub fn filter_env(env: &HashMap<String, String>) -> HashMap<String, String> {
-    env.iter()
-        .filter(|(key, _)| is_safe_env(key) && is_valid_env_key(key))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
+    filter_remote_env(env)
 }
 
-pub fn is_safe_env(key: &str) -> bool {
-    for prefix in BLOCKED_ENV_PREFIXES {
-        if key.starts_with(prefix) {
-            return false;
-        }
-    }
-
-    if SAFE_ENV_ALLOWLIST.contains(&key) {
-        return true;
-    }
-
-    for prefix in SAFE_ENV_PREFIX_ALLOWLIST {
-        if key.starts_with(prefix) {
-            return true;
-        }
-    }
-
-    false
-}
-
-pub fn is_valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+fn parse_remote_command(command: &str) -> anyhow::Result<(String, Vec<String>)> {
+    let words = shell_words::split(command)?;
+    let (program, args) = words
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("node command must not be empty"))?;
+    Ok((program.clone(), args.to_vec()))
 }
 
 pub(crate) fn ssh_node_info(target: &str) -> NodeInfo {
@@ -161,9 +121,9 @@ fn ssh_target_node_info(target: &SshResolvedTarget) -> NodeInfo {
     }
 }
 
-/// Forward a shell command to a connected node for execution.
+/// Forward a command to a connected node as a structured process invocation.
 ///
-/// Uses `node.invoke` internally with `system.run` as the command.
+/// Uses `node.invoke` internally with `system.exec.v1` as the command.
 /// Returns the stdout/stderr/exit_code from the remote execution.
 pub async fn exec_on_node(
     state: &Arc<GatewayState>,
@@ -173,23 +133,14 @@ pub async fn exec_on_node(
     cwd: Option<&str>,
     env: Option<&HashMap<String, String>>,
 ) -> anyhow::Result<NodeExecResult> {
-    // Build the args for system.run.
-    let mut args = serde_json::json!({
-        "command": command,
-        "timeout": timeout_secs * 1000, // ms
-    });
-
-    if let Some(cwd) = cwd {
-        args["cwd"] = serde_json::json!(cwd);
-    }
-
-    // Filter env to safe allowlist.
-    if let Some(env_map) = env {
-        let filtered = filter_env(env_map);
-        if !filtered.is_empty() {
-            args["env"] = serde_json::to_value(filtered)?;
-        }
-    }
+    let (program, args) = parse_remote_command(command)?;
+    let request = SystemExecRequest {
+        program,
+        args,
+        cwd: cwd.map(str::to_string),
+        env: env.map(filter_env).unwrap_or_default(),
+        timeout_ms: timeout_secs.saturating_mul(1000),
+    };
 
     // Look up node connection.
     let conn_id = {
@@ -198,6 +149,13 @@ pub async fn exec_on_node(
             .nodes
             .get(node_id)
             .ok_or_else(|| anyhow::anyhow!("node '{node_id}' not connected"))?;
+        if !node
+            .commands
+            .iter()
+            .any(|command| command == SYSTEM_EXEC_COMMAND)
+        {
+            anyhow::bail!("node '{node_id}' does not support secure structured execution");
+        }
         node.conn_id.clone()
     };
 
@@ -207,25 +165,14 @@ pub async fn exec_on_node(
         "node.invoke.request",
         serde_json::json!({
             "invokeId": invoke_id,
-            "command": "system.run",
-            "args": args,
+            "command": SYSTEM_EXEC_COMMAND,
+            "args": request,
         }),
         state.next_seq(),
     );
     let event_json = serde_json::to_string(&invoke_event)?;
 
-    {
-        let registry = state.client_registry.read().await;
-        let node_client = registry
-            .clients
-            .get(&conn_id)
-            .ok_or_else(|| anyhow::anyhow!("node connection lost"))?;
-        if !node_client.send(&event_json) {
-            anyhow::bail!("failed to send invoke to node");
-        }
-    }
-
-    // Register the pending invoke and wait for result.
+    // Register before sending so an immediate node response cannot win the race.
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         let mut inner = state.inner.write().await;
@@ -233,12 +180,25 @@ pub async fn exec_on_node(
             .pending_invokes
             .insert(invoke_id.clone(), crate::state::PendingInvoke {
                 request_id: invoke_id.clone(),
+                expected_conn_id: Some(conn_id.clone()),
                 sender: tx,
                 created_at: std::time::Instant::now(),
             });
     }
 
-    let timeout = Duration::from_secs(timeout_secs.max(5));
+    let sent = {
+        let registry = state.client_registry.read().await;
+        registry
+            .clients
+            .get(&conn_id)
+            .is_some_and(|node_client| node_client.send(&event_json))
+    };
+    if !sent {
+        state.inner.write().await.pending_invokes.remove(&invoke_id);
+        anyhow::bail!("failed to send invoke to node");
+    }
+
+    let timeout = Duration::from_secs(timeout_secs.max(5).saturating_add(2));
     let result = match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(value)) => value,
         Ok(Err(_)) => {
@@ -450,17 +410,6 @@ pub async fn query_node_providers(
     );
     let event_json = serde_json::to_string(&invoke_event)?;
 
-    {
-        let registry = state.client_registry.read().await;
-        let node_client = registry
-            .clients
-            .get(&conn_id)
-            .ok_or_else(|| anyhow::anyhow!("node connection lost"))?;
-        if !node_client.send(&event_json) {
-            anyhow::bail!("failed to send providers invoke to node");
-        }
-    }
-
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         let mut inner = state.inner.write().await;
@@ -468,9 +417,22 @@ pub async fn query_node_providers(
             .pending_invokes
             .insert(invoke_id.clone(), crate::state::PendingInvoke {
                 request_id: invoke_id.clone(),
+                expected_conn_id: Some(conn_id.clone()),
                 sender: tx,
                 created_at: std::time::Instant::now(),
             });
+    }
+
+    let sent = {
+        let registry = state.client_registry.read().await;
+        registry
+            .clients
+            .get(&conn_id)
+            .is_some_and(|node_client| node_client.send(&event_json))
+    };
+    if !sent {
+        state.inner.write().await.pending_invokes.remove(&invoke_id);
+        anyhow::bail!("failed to send providers invoke to node");
     }
 
     let result = match tokio::time::timeout(Duration::from_secs(10), rx).await {
@@ -931,6 +893,21 @@ mod tests {
         assert!(!filtered.contains_key("OPENAI_API_KEY"));
         assert!(!filtered.contains_key("MOLTIS_AUTH_TOKEN"));
         assert!(!filtered.contains_key("CUSTOM_VAR"));
+    }
+
+    #[test]
+    fn remote_command_parser_preserves_metacharacters_as_arguments() {
+        let (program, args) =
+            parse_remote_command("printf '%s' 'a; $(id) && touch nope | cat > out *'").unwrap();
+
+        assert_eq!(program, "printf");
+        assert_eq!(args, ["%s", "a; $(id) && touch nope | cat > out *"]);
+    }
+
+    #[test]
+    fn remote_command_parser_rejects_empty_or_unbalanced_input() {
+        assert!(parse_remote_command("  ").is_err());
+        assert!(parse_remote_command("printf 'unterminated").is_err());
     }
 
     #[test]

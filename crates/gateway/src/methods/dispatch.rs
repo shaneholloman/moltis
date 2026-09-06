@@ -198,7 +198,6 @@ const WRITE_METHODS: &[&str] = &[
     "stt.transcribe",
     "stt.setProvider",
     "voicewake.set",
-    "node.invoke",
     "nodes.set_session",
     "chat.send",
     "chat.send_sync",
@@ -535,6 +534,17 @@ mod tests {
         );
         assert!(
             authorize_method("feedback.submit", "operator", &scopes(&["operator.write"])).is_none()
+        );
+    }
+
+    #[test]
+    fn node_invoke_requires_admin_scope() {
+        assert_error_code(
+            authorize_method("node.invoke", "operator", &scopes(&["operator.write"])),
+            "UNAUTHORIZED",
+        );
+        assert!(
+            authorize_method("node.invoke", "operator", &scopes(&["operator.admin"])).is_none()
         );
     }
 

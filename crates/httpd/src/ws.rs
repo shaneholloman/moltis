@@ -36,6 +36,41 @@ fn top_level_param_keys(params: &Option<serde_json::Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn resolve_connection_role(
+    requested: Option<&str>,
+    device_authenticated: bool,
+) -> Result<String, ErrorShape> {
+    if device_authenticated {
+        if requested.is_some_and(|role| role != roles::NODE) {
+            return Err(ErrorShape::new(
+                error_codes::FORBIDDEN,
+                "node credentials cannot request a non-node role",
+            ));
+        }
+        return Ok(roles::NODE.into());
+    }
+    if requested == Some(roles::NODE) {
+        return Err(ErrorShape::new(
+            error_codes::FORBIDDEN,
+            "node role requires node credentials",
+        ));
+    }
+    Ok(requested.unwrap_or(roles::OPERATOR).to_string())
+}
+
+fn validate_node_identity(
+    authenticated_id: Option<&str>,
+    client_id: &str,
+) -> Result<(), ErrorShape> {
+    if authenticated_id.is_some_and(|id| id != client_id) {
+        return Err(ErrorShape::new(
+            error_codes::FORBIDDEN,
+            "authenticated node identity does not match client id",
+        ));
+    }
+    Ok(())
+}
+
 /// Handle a single WebSocket connection through its full lifecycle:
 /// handshake (with auth) → message loop → cleanup.
 pub async fn handle_connection(
@@ -777,46 +812,62 @@ pub async fn handle_connection(
         return;
     }
 
-    // Device-token-authenticated connections default to "node" role.
-    let role = if device_token_device_id.is_some() {
-        params.role.clone().unwrap_or_else(|| roles::NODE.into())
-    } else {
-        params
-            .role
-            .clone()
-            .unwrap_or_else(|| roles::OPERATOR.into())
+    let device_authenticated = device_token_device_id.is_some();
+    if let Err(error) = validate_node_identity(device_token_device_id.as_deref(), &params.client.id)
+    {
+        warn!(conn_id = %conn_id, client_id = %params.client.id, "ws: node identity mismatch denied");
+        let response = ResponseFrame::err(&request_id, error);
+        #[allow(clippy::unwrap_used)] // serializing known-valid struct
+        let _ = client_tx.try_send(serde_json::to_string(&response).unwrap());
+        graceful_writer_shutdown(client_tx, write_handle).await;
+        return;
+    }
+    let role = match resolve_connection_role(params.role.as_deref(), device_authenticated) {
+        Ok(role) => role,
+        Err(error) => {
+            warn!(conn_id = %conn_id, requested_role = ?params.role, "ws: node credential role escalation denied");
+            let response = ResponseFrame::err(&request_id, error);
+            #[allow(clippy::unwrap_used)] // serializing known-valid struct
+            let _ = client_tx.try_send(serde_json::to_string(&response).unwrap());
+            graceful_writer_shutdown(client_tx, write_handle).await;
+            return;
+        },
     };
 
     // Determine scopes based on auth method.
     // API keys MUST declare scopes explicitly — empty scopes means no access.
     // Non-API-key auth (password, local, legacy) gets full access.
-    let scopes = match api_key_scopes {
-        Some(key_scopes) if !key_scopes.is_empty() => key_scopes,
-        Some(_empty) => {
-            // API key with no scopes → reject (least-privilege).
-            warn!(conn_id = %conn_id, "ws: API key has no scopes, denying access");
-            let err = ResponseFrame::err(
-                &request_id,
-                ErrorShape::new(
-                    error_codes::FORBIDDEN,
-                    "API key has no scopes — specify at least one scope when creating the key",
-                ),
-            );
-            #[allow(clippy::unwrap_used)] // serializing known-valid struct
-            let _ = client_tx.try_send(serde_json::to_string(&err).unwrap());
-            graceful_writer_shutdown(client_tx, write_handle).await;
-            return;
-        },
-        None => {
-            // Non-API-key auth (password, local, legacy) → full access.
-            vec![
-                scopes::ADMIN.into(),
-                scopes::READ.into(),
-                scopes::WRITE.into(),
-                scopes::APPROVALS.into(),
-                scopes::PAIRING.into(),
-            ]
-        },
+    let scopes = if device_authenticated {
+        Vec::new()
+    } else {
+        match api_key_scopes {
+            Some(key_scopes) if !key_scopes.is_empty() => key_scopes,
+            Some(_empty) => {
+                // API key with no scopes → reject (least-privilege).
+                warn!(conn_id = %conn_id, "ws: API key has no scopes, denying access");
+                let err = ResponseFrame::err(
+                    &request_id,
+                    ErrorShape::new(
+                        error_codes::FORBIDDEN,
+                        "API key has no scopes — specify at least one scope when creating the key",
+                    ),
+                );
+                #[allow(clippy::unwrap_used)] // serializing known-valid struct
+                let _ = client_tx.try_send(serde_json::to_string(&err).unwrap());
+                graceful_writer_shutdown(client_tx, write_handle).await;
+                return;
+            },
+            None => {
+                // Non-API-key auth (password, local, legacy) → full access.
+                vec![
+                    scopes::ADMIN.into(),
+                    scopes::READ.into(),
+                    scopes::WRITE.into(),
+                    scopes::APPROVALS.into(),
+                    scopes::PAIRING.into(),
+                ]
+            },
+        }
     };
 
     // Build HelloOk with auth info.
@@ -1339,6 +1390,25 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn node_credentials_cannot_request_operator_role() {
+        let error = resolve_connection_role(Some(roles::OPERATOR), true).unwrap_err();
+        assert_eq!(error.code, error_codes::FORBIDDEN);
+        assert_eq!(resolve_connection_role(None, true).unwrap(), roles::NODE);
+        assert_eq!(
+            resolve_connection_role(Some(roles::NODE), true).unwrap(),
+            roles::NODE
+        );
+        assert!(resolve_connection_role(Some(roles::NODE), false).is_err());
+    }
+
+    #[test]
+    fn authenticated_node_id_must_match_client_id() {
+        assert!(validate_node_identity(Some("node-a"), "node-a").is_ok());
+        assert!(validate_node_identity(Some("node-a"), "node-b").is_err());
+        assert!(validate_node_identity(None, "operator-client").is_ok());
+    }
 
     #[tokio::test]
     async fn receive_challenge_response_skips_unrelated_text_frames() {

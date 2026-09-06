@@ -1049,6 +1049,122 @@ impl NodeExecProvider for DisconnectedNodeProvider {
     }
 }
 
+/// Connected provider used to verify explicit node clearing does not route remotely.
+struct ConnectedNodeProvider;
+
+#[async_trait]
+impl NodeExecProvider for ConnectedNodeProvider {
+    async fn exec_on_node(
+        &self,
+        _node_id: &str,
+        _command: &str,
+        _timeout_secs: u64,
+        _cwd: Option<&str>,
+        _env: Option<&HashMap<String, String>>,
+    ) -> anyhow::Result<ExecResult> {
+        unreachable!("explicit null node must use local execution");
+    }
+
+    async fn resolve_node_id(&self, _node_ref: &str) -> Option<String> {
+        Some("connected-node".into())
+    }
+
+    fn has_connected_nodes(&self) -> bool {
+        true
+    }
+
+    async fn default_node_ref(&self) -> Option<String> {
+        Some("connected-node".into())
+    }
+}
+
+struct RecordingNodeProvider {
+    called: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl NodeExecProvider for RecordingNodeProvider {
+    async fn exec_on_node(
+        &self,
+        _node_id: &str,
+        _command: &str,
+        _timeout_secs: u64,
+        _cwd: Option<&str>,
+        _env: Option<&HashMap<String, String>>,
+    ) -> anyhow::Result<ExecResult> {
+        self.called.store(true, Ordering::SeqCst);
+        Ok(ExecResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    async fn resolve_node_id(&self, _node_ref: &str) -> Option<String> {
+        Some("connected-node".into())
+    }
+
+    fn has_connected_nodes(&self) -> bool {
+        true
+    }
+
+    async fn default_node_ref(&self) -> Option<String> {
+        None
+    }
+}
+
+#[tokio::test]
+async fn test_remote_exec_checks_approval_before_forwarding() {
+    let called = Arc::new(AtomicBool::new(false));
+    let mut manager = ApprovalManager::default();
+    manager.security_level = crate::approval::SecurityLevel::Deny;
+    let manager = Arc::new(manager);
+    let broadcaster: Arc<dyn ApprovalBroadcaster> = Arc::new(TestBroadcaster::new());
+    let tool = ExecTool::default()
+        .with_node_provider(
+            Arc::new(RecordingNodeProvider {
+                called: Arc::clone(&called),
+            }),
+            None,
+        )
+        .with_approval(manager, broadcaster);
+
+    let error = tool
+        .execute(serde_json::json!({
+            "command": "printf '%s' 'not forwarded'",
+            "node": "connected-node",
+        }))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("security level is 'deny'"));
+    assert!(!called.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn test_exec_null_node_clears_configured_default() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tool = ExecTool {
+        working_dir: Some(temp_dir.path().to_path_buf()),
+        ..Default::default()
+    }
+    .with_node_provider(
+        Arc::new(ConnectedNodeProvider),
+        Some("configured-node".into()),
+    );
+
+    let result = tool
+        .execute(serde_json::json!({
+            "command": "echo local",
+            "node": null
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["stdout"].as_str().unwrap().trim(), "local");
+    assert_eq!(result["exit_code"], 0);
+}
+
 #[tokio::test]
 async fn test_exec_ignores_node_param_when_no_nodes_connected() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1120,6 +1236,17 @@ async fn test_exec_schema_hides_node_when_no_nodes_connected() {
     assert!(
         !props.contains_key("node"),
         "node param should be hidden when no nodes are connected"
+    );
+}
+
+#[tokio::test]
+async fn test_exec_schema_allows_explicit_null_node_when_connected() {
+    let tool = ExecTool::default().with_node_provider(Arc::new(ConnectedNodeProvider), None);
+
+    let schema = tool.parameters_schema();
+    assert_eq!(
+        schema["properties"]["node"]["type"],
+        serde_json::json!(["string", "null"])
     );
 }
 

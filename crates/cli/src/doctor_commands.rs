@@ -10,6 +10,8 @@ use {
     anyhow::Result,
     moltis_config::{
         MoltisConfig,
+        env_subst::{contains_env_placeholder, substitute_env_placeholders},
+        schema::McpTransport,
         validate::{self, Severity},
     },
     secrecy::ExposeSecret,
@@ -643,17 +645,36 @@ fn check_mcp_servers(config: &MoltisConfig) -> Section {
             continue;
         }
 
-        // SSE/HTTP transports don't need a local command
-        let transport = entry.transport.as_str();
-        if transport == "sse" || transport == "http" {
-            if let Some(ref url) = entry.url {
-                section.push(Status::Ok, format!("{name}: {transport} transport ({url})"));
-            } else {
+        let transport = entry.transport_type();
+        if matches!(transport, McpTransport::Sse | McpTransport::StreamableHttp) {
+            let Some(url) = entry.url.as_deref() else {
                 section.push(
                     Status::Fail,
                     format!("{name}: {transport} transport but no url configured"),
                 );
+                continue;
+            };
+
+            let resolved_url = substitute_env_placeholders(url, &config.env);
+            if contains_env_placeholder(&resolved_url) {
+                section.push(
+                    Status::Info,
+                    format!(
+                        "{name}: {transport} transport URL depends on an unavailable environment value"
+                    ),
+                );
+                continue;
             }
+
+            if reqwest::Url::parse(resolved_url.trim()).is_err() {
+                section.push(
+                    Status::Fail,
+                    format!("{name}: {transport} transport has an invalid url"),
+                );
+                continue;
+            }
+
+            section.push(Status::Ok, format!("{name}: {transport} transport ({url})"));
             continue;
         }
 
